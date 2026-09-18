@@ -1433,6 +1433,55 @@ class SessionSessionsMixin:
         """At least N sessions exist (archived included); LIMIT short-circuits session_count()'s scan."""
         return len(self._read_all("SELECT 1 FROM sessions LIMIT ?", (n,))) >= n
 
+    def session_count_by_peer(
+        self, *, include_archived: bool = True, archived_only: bool = False,
+        exclude_children: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Feishu ``[{peer_id, user_name, count}]`` via one direct GROUP BY over the canonical peer
+        expression — never a rich-row materialization. Scope mirrors ``session_count_by_source``:
+        ``exclude_children`` hides delegate/compression children, and the defaults match the stats
+        endpoint's ``by_source`` (archived included). ``user_name`` is presentation-only, taken from
+        the group's newest non-empty ``origin_json.user_name`` (display_name is often a chat/open id
+        on Feishu rows and is never used); nameless groups report None. Sorted ``count DESC`` then
+        ``peer_id ASC``."""
+        where_clauses, params = _session_filter_where(
+            exclude_children=exclude_children, archived_only=archived_only,
+            include_archived=include_archived,
+        )
+        where_clauses.append("s.source = 'feishu'")
+        peer_name = f"NULLIF({_sql_trim_whitespace(_sql_json_extract('s.origin_json', '$.user_name'))}, '')"
+        with self._read_ctx() as conn:
+            if self._conn is None:
+                raise RuntimeError("SessionDB connection is closed")
+            rows = conn.execute(
+                f"""
+                WITH scoped AS (
+                    SELECT {_FEISHU_CANONICAL_PEER_SQL} AS peer_id,
+                           {peer_name} AS peer_name,
+                           s.started_at, s.id
+                    FROM sessions s{_where_sql(where_clauses, ' ')}
+                ),
+                ranked AS (
+                    SELECT peer_id, peer_name,
+                           COUNT(*) OVER (PARTITION BY peer_id) AS count,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY peer_id
+                               ORDER BY (peer_name IS NOT NULL) DESC, started_at DESC, id DESC
+                           ) AS rn
+                    FROM scoped
+                )
+                SELECT peer_id, peer_name AS user_name, count
+                FROM ranked WHERE rn = 1
+                ORDER BY count DESC, peer_id ASC
+                """,
+                params,
+            ).fetchall()
+        return [
+            {"peer_id": str(row["peer_id"]), "user_name": row["user_name"],
+             "count": int(row["count"] or 0)}
+            for row in rows
+        ]
+
     def session_count_by_source(
         self, *, include_archived: bool = False, archived_only: bool = False,
         exclude_children: bool = False,

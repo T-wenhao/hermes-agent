@@ -3381,6 +3381,96 @@ class TestFeishuPeerFiltering:
         assert db.session_count(source="feishu", peer_id="on_a", exclude_children=False) == 3
 
 
+class TestFeishuPeerAggregation:
+    """session_count_by_peer: direct Feishu GROUP BY over the canonical peer
+    expression, scoped like by_source (children hidden, archived included)."""
+
+    @staticmethod
+    def _feishu(db, sid, *, user_id=None, origin=None, source="feishu", **kwargs):
+        db.create_session(
+            sid, source, user_id=user_id,
+            origin_json=json.dumps(origin) if origin is not None else None,
+            **kwargs,
+        )
+
+    def test_same_alt_groups_together_regardless_of_names(self, db):
+        self._feishu(db, "s1", origin={"user_id_alt": "on_a", "user_name": "Alice A"})
+        self._feishu(db, "s2", user_id="col-noise", origin={"user_id_alt": "on_a"})
+        rows = db.session_count_by_peer()
+        assert rows == [{"peer_id": "on_a", "user_name": "Alice A", "count": 2}]
+
+    def test_different_alts_stay_separate(self, db):
+        self._feishu(db, "s1", origin={"user_id_alt": "on_a"})
+        self._feishu(db, "s2", origin={"user_id_alt": "on_b"})
+        rows = db.session_count_by_peer()
+        assert [r["peer_id"] for r in rows] == ["on_a", "on_b"]
+        assert all(r["count"] == 1 for r in rows)
+
+    def test_legacy_and_unknown_buckets_present(self, db):
+        self._feishu(db, "modern", origin={"user_id_alt": "on_a"})
+        self._feishu(db, "legacy", user_id="legacy-id")
+        self._feishu(db, "mystery")
+        rows = {r["peer_id"]: r["count"] for r in db.session_count_by_peer()}
+        assert rows == {"on_a": 1, "legacy-id": 1, "__unknown__": 1}
+
+    def test_representative_name_is_newest_non_empty(self, db):
+        self._feishu(db, "s1", origin={"user_id_alt": "on_a", "user_name": "Old Name"})
+        db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?",
+                         (1000.0, "s1"))
+        self._feishu(db, "s2", origin={"user_id_alt": "on_a", "user_name": "New Name"})
+        db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?",
+                         (2000.0, "s2"))
+        # A nameless newer row must not blank out the group's name...
+        self._feishu(db, "s3", origin={"user_id_alt": "on_a"})
+        db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?",
+                         (3000.0, "s3"))
+        rows = db.session_count_by_peer()
+        assert rows == [{"peer_id": "on_a", "user_name": "New Name", "count": 3}]
+        # ...and a group with no names at all reports None.
+        self._feishu(db, "s4", user_id="anon")
+        assert db.session_count_by_peer()[-1] == {
+            "peer_id": "anon", "user_name": None, "count": 1}
+
+    def test_scope_mirrors_by_source(self, db):
+        self._feishu(db, "live", origin={"user_id_alt": "on_a"})
+        self._feishu(db, "old", origin={"user_id_alt": "on_a"})
+        db.set_session_archived("old", True)
+        self._feishu(db, "parent", origin={"user_id_alt": "on_a"})
+        db.end_session("parent", "compression")
+        self._feishu(db, "tip", origin={"user_id_alt": "on_a"},
+                     parent_session_id="parent")
+        self._feishu(db, "helper", origin={"user_id_alt": "on_a"},
+                     model_config={"_delegate_from": "parent"})
+
+        # Archived included, children hidden — exactly the by_source stats scope.
+        assert db.session_count_by_source(include_archived=True,
+                                          exclude_children=True) == {"feishu": 3}
+        by_peer = db.session_count_by_peer()
+        assert by_peer == [{"peer_id": "on_a", "user_name": None, "count": 3}]
+        # Archived-only narrows to the archived row.
+        assert db.session_count_by_peer(
+            include_archived=False, archived_only=True) == [
+            {"peer_id": "on_a", "user_name": None, "count": 1}]
+        # Children admitted when the caller asks for them.
+        assert db.session_count_by_peer(exclude_children=False)[0]["count"] == 5
+
+    def test_ordering_is_count_desc_then_peer_id_asc(self, db):
+        self._feishu(db, "a1", origin={"user_id_alt": "on_two"})
+        self._feishu(db, "a2", origin={"user_id_alt": "on_two"})
+        self._feishu(db, "b1", origin={"user_id_alt": "on_one"})
+        self._feishu(db, "z1", origin={"user_id_alt": "on_one"})  # tie on count
+        self._feishu(db, "solo", origin={"user_id_alt": "on_solo"})
+        rows = db.session_count_by_peer()
+        assert [(r["peer_id"], r["count"]) for r in rows] == [
+            ("on_one", 2), ("on_two", 2), ("on_solo", 1)]
+
+    def test_non_feishu_rows_never_counted(self, db):
+        self._feishu(db, "f1", origin={"user_id_alt": "on_a"})
+        self._feishu(db, "t1", origin={"user_id_alt": "on_a"}, source="telegram")
+        assert db.session_count_by_peer() == [
+            {"peer_id": "on_a", "user_name": None, "count": 1}]
+
+
 class TestResolveSessionByNameOrId:
     """Tests for the main.py helper that resolves names or IDs."""
 
