@@ -3285,10 +3285,105 @@ class TestExcludeSources:
         assert "tool" not in sources
 
 
+class TestFeishuPeerFiltering:
+    """Feishu per-peer filtering on list_sessions_rich / session_count.
+
+    Canonical peer identity: origin_json.user_id_alt → origin_json.user_id →
+    sessions.user_id → ``__unknown__``. The predicate lives in the shared WHERE
+    builder so listed rows and totals cannot diverge."""
+
+    @staticmethod
+    def _feishu(db, sid, *, user_id=None, origin=None, source="feishu", **kwargs):
+        db.create_session(
+            sid, source, user_id=user_id,
+            origin_json=json.dumps(origin) if origin is not None else None,
+            **kwargs,
+        )
+
+    def test_alt_id_takes_precedence(self, db):
+        self._feishu(db, "s1", user_id="col-id",
+                     origin={"user_id_alt": "on_alt", "user_id": "on_primary"})
+        listed = db.list_sessions_rich(source="feishu", peer_id="on_alt")
+        assert [s["id"] for s in listed] == ["s1"]
+        # The shadowed candidates are not separate peers for this row.
+        assert db.list_sessions_rich(source="feishu", peer_id="on_primary") == []
+        assert db.list_sessions_rich(source="feishu", peer_id="col-id") == []
+
+    def test_missing_alt_falls_back_to_origin_user_id(self, db):
+        self._feishu(db, "s1", user_id="col-id", origin={"user_id": "on_primary"})
+        listed = db.list_sessions_rich(source="feishu", peer_id="on_primary")
+        assert [s["id"] for s in listed] == ["s1"]
+        assert db.list_sessions_rich(source="feishu", peer_id="col-id") == []
+
+    def test_missing_origin_falls_back_to_column_user_id(self, db):
+        self._feishu(db, "s1", user_id="col-id")
+        assert [s["id"] for s in db.list_sessions_rich(source="feishu", peer_id="col-id")] == ["s1"]
+
+    def test_identityless_rows_land_in_unknown_bucket(self, db):
+        self._feishu(db, "s1", user_id="", origin={"user_id_alt": "  "})
+        self._feishu(db, "s2")
+        listed = db.list_sessions_rich(source="feishu", peer_id="__unknown__")
+        assert {s["id"] for s in listed} == {"s1", "s2"}
+
+    def test_peer_filter_excludes_other_peers(self, db):
+        self._feishu(db, "alice1", origin={"user_id_alt": "on_alice"})
+        self._feishu(db, "alice2", origin={"user_id_alt": "on_alice"})
+        self._feishu(db, "bob1", origin={"user_id_alt": "on_bob"})
+        listed = db.list_sessions_rich(source="feishu", peer_id="on_alice")
+        assert {s["id"] for s in listed} == {"alice1", "alice2"}
+        # total agrees with the listed rows: one predicate, two queries
+        assert db.session_count(source="feishu", peer_id="on_alice") == 2
+        assert db.session_count(source="feishu", peer_id="on_bob") == 1
+        assert db.session_count(source="feishu", peer_id="__unknown__") == 0
+
+    def test_session_count_follows_same_predicate(self, db):
+        self._feishu(db, "s1", origin={"user_id_alt": "on_a"})
+        self._feishu(db, "s2", user_id="legacy-id")  # legacy row: column bucket
+        assert db.session_count(source="feishu", peer_id="on_a") == 1
+        assert db.session_count(source="feishu", peer_id="legacy-id") == 1
+        # Filtering by peer without an explicit source still only sees Feishu rows.
+        assert db.session_count(peer_id="on_a") == 1
+
+    def test_same_peer_id_on_other_source_never_matches(self, db):
+        self._feishu(db, "feishu_row", origin={"user_id_alt": "on_shared"})
+        self._feishu(db, "telegram_row", origin={"user_id_alt": "on_shared"}, source="telegram")
+        listed = db.list_sessions_rich(peer_id="on_shared")
+        assert [s["id"] for s in listed] == ["feishu_row"]
+        assert db.session_count(peer_id="on_shared") == 1
+
+    def test_malformed_origin_json_falls_back_without_raising(self, db):
+        self._feishu(db, "s1", user_id="col-id", origin="NOT JSON{{{")
+        self._feishu(db, "s2", origin="{broken")
+        listed = db.list_sessions_rich(source="feishu", peer_id="col-id")
+        assert [s["id"] for s in listed] == ["s1"]
+        assert {s["id"] for s in db.list_sessions_rich(source="feishu", peer_id="__unknown__")} == {"s2"}
+        assert db.session_count(source="feishu", peer_id="col-id") == 1
+
+    def test_child_visibility_unchanged_under_peer_filter(self, db):
+        """Compression continuations and delegate children keep their usual
+        visibility rules when a peer filter is active."""
+        self._feishu(db, "parent", origin={"user_id_alt": "on_a"})
+        db.end_session("parent", "compression")
+        self._feishu(db, "compression_child", origin={"user_id_alt": "on_a"},
+                     parent_session_id="parent")
+        self._feishu(db, "delegate_child", origin={"user_id_alt": "on_a"},
+                     model_config={"_delegate_from": "parent"})
+
+        # Default visibility hides delegate children and projects a compression
+        # chain onto its tip — the peer predicate must not change either rule.
+        default_view = db.list_sessions_rich(source="feishu", peer_id="on_a")
+        assert {s["id"] for s in default_view} == {"compression_child"}
+        assert db.session_count(source="feishu", peer_id="on_a", exclude_children=True) == 1
+        with_children = db.list_sessions_rich(source="feishu", peer_id="on_a",
+                                              include_children=True)
+        assert {s["id"] for s in with_children} == {
+            "parent", "compression_child", "delegate_child"}
+        assert db.session_count(source="feishu", peer_id="on_a", exclude_children=False) == 3
 
 
 class TestResolveSessionByNameOrId:
     """Tests for the main.py helper that resolves names or IDs."""
+
 
     def test_resolve_by_id(self, db):
         db.create_session("test-id-123", "cli")

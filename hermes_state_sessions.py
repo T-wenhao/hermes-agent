@@ -113,10 +113,13 @@ def _session_filter_where(
     *, exclude_children: bool = False, source: str = None, sources: List[str] = None,
     session_key: str = None, exclude_sources: List[str] = None, cwd_prefix: str = None,
     min_message_count: int = 0, archived_only: bool = False, include_archived: bool = False,
+    peer_id: str = None,
 ) -> Tuple[List[str], List[Any]]:
     """Shared ``sessions s`` WHERE builder so counts line up with listed rows. ``exclude_children``
     hides sub-agent runs and compression continuations but keeps branch/reset children
-    (``_LISTABLE_CHILD_SQL``). Clause order is part of the SQL text contract."""
+    (``_LISTABLE_CHILD_SQL``). Clause order is part of the SQL text contract. ``peer_id`` is
+    Feishu-only and exact: it forces ``s.source = 'feishu'`` so a Telegram row sharing the id
+    string can never match."""
     where: List[str] = []
     params: List[Any] = []
     if exclude_children:
@@ -140,6 +143,11 @@ def _session_filter_where(
         if values:
             where.append(clause)
             params.extend(values)
+    if peer_id:
+        # Between the source/session filters and the archived clauses: a peer bucket scopes
+        # identity like source does, not lifecycle.
+        where.append(f"s.source = 'feishu' AND {_FEISHU_CANONICAL_PEER_SQL} = ?")
+        params.append(peer_id)
     if archived_only:
         where.append("s.archived = 1")
     elif not include_archived:
@@ -1215,15 +1223,17 @@ class SessionSessionsMixin:
         order_by_last_active: bool = False, include_archived: bool = False, archived_only: bool = False,
         id_query: str = None, search_query: str = None, compact_rows: bool = False,
         include_pinned: bool = False, session_key: str = None, include_hidden: bool = False,
+        peer_id: str = None,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview and ``last_active`` in one query. ``order_by_last_active`` sorts
         by the chain TIP via a recursive CTE (the only path honouring ``id_query`` / ``search_query``);
-        ``include_pinned`` back-fills pins the page missed, still obeying the other filters."""
+        ``include_pinned`` back-fills pins the page missed, still obeying the other filters.
+        ``peer_id`` scopes to one Feishu peer (Feishu-only, exact match)."""
         self.flush_token_counts()  # rows carry token/cost totals
         where_clauses, params = _session_filter_where(
             exclude_children=not include_children, source=source, sources=sources, session_key=session_key,
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
-            archived_only=archived_only, include_archived=include_archived,
+            archived_only=archived_only, include_archived=include_archived, peer_id=peer_id,
         )
         if not include_hidden:
             where_clauses.append("s.hidden = 0")
@@ -1409,13 +1419,13 @@ class SessionSessionsMixin:
     def session_count(
         self, source: str = None, sources: List[str] = None, cwd_prefix: str = None,
         min_message_count: int = 0, include_archived: bool = False, archived_only: bool = False,
-        exclude_children: bool = False, exclude_sources: List[str] = None,
+        exclude_children: bool = False, exclude_sources: List[str] = None, peer_id: str = None,
     ) -> int:
         """Count sessions with list_sessions_rich's filters so a paired "load more" total matches."""
         where_clauses, params = _session_filter_where(
             exclude_children=exclude_children, source=source, sources=sources,
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
-            archived_only=archived_only, include_archived=include_archived,
+            archived_only=archived_only, include_archived=include_archived, peer_id=peer_id,
         )
         return self._read_one(f"SELECT COUNT(*) FROM sessions s{_where_sql(where_clauses, ' ')}", params)[0]
 
