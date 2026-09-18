@@ -5475,3 +5475,104 @@ def test_mount_spa_dynamic_web_dist_recheck(tmp_path, monkeypatch):
     res2 = client.get("/")
     assert res2.status_code == 200
     assert "Test" in res2.text
+
+
+class TestFeishuPeerSessionFiltering:
+    """``GET /api/sessions?source=feishu&peer_id=...`` — per-peer session
+    filtering for the dashboard's Feishu contact selector. The filter is an
+    exact, Feishu-only contract: pairing it with anything but a bare
+    ``source=feishu`` is a client bug and must fail loudly with 400, not
+    silently list the wrong rows."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_test_client(self, monkeypatch, _isolate_hermes_home):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+        monkeypatch.setattr(
+            hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db"
+        )
+
+        self.auth_client = TestClient(app)
+        self.auth_client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+
+    @staticmethod
+    def _seed_feishu(sids, *, user_id=None, origin=None):
+        import json as _json
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            for sid in sids:
+                db.create_session(
+                    session_id=sid, source="feishu", user_id=user_id,
+                    origin_json=_json.dumps(origin) if origin is not None else None,
+                )
+        finally:
+            db.close()
+
+    def test_feishu_peer_filter_returns_matching_rows_and_total(self):
+        import json as _json
+
+        self._seed_feishu(["alice1", "alice2"], origin={"user_id_alt": "on_alice"})
+        self._seed_feishu(["bob1"], origin={"user_id_alt": "on_bob"})
+
+        resp = self.auth_client.get(
+            "/api/sessions", params={"source": "feishu", "peer_id": "on_alice"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 2
+        assert {s["id"] for s in body["sessions"]} == {"alice1", "alice2"}
+        # A user_id_alt is an opaque key: the raw JSON must round-trip exactly.
+        seeded = _json.loads(
+            next(s for s in body["sessions"] if s["id"] == "alice1")["origin_json"])
+        assert seeded["user_id_alt"] == "on_alice"
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"peer_id": "on_alice"},                                   # no source at all
+            {"source": "telegram", "peer_id": "on_alice"},             # wrong source
+            {"sources": "feishu,telegram", "peer_id": "on_alice"},     # multi-source
+            {"sources": "feishu", "peer_id": "on_alice"},              # not the exact param
+        ],
+        ids=["no-source", "wrong-source", "multi-source", "sources-param"],
+    )
+    def test_peer_filter_off_exact_feishu_source_is_400(self, params):
+        resp = self.auth_client.get("/api/sessions", params=params)
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "peer_id requires source=feishu"
+
+    def test_profile_scoped_peer_filter_reads_that_profiles_store(self):
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+
+        self._seed_feishu(["default-store-row"], origin={"user_id_alt": "on_alice"})
+        import json as _json
+
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=worker_home / "state.db")
+        try:
+            db.create_session(session_id="worker-row", source="feishu", user_id="on_alice")
+        finally:
+            db.close()
+
+        worker = self.auth_client.get(
+            "/api/sessions",
+            params={"source": "feishu", "peer_id": "on_alice", "profile": "worker"})
+        assert worker.status_code == 200
+        assert [s["id"] for s in worker.json()["sessions"]] == ["worker-row"]
+
+        default = self.auth_client.get(
+            "/api/sessions", params={"source": "feishu", "peer_id": "on_alice"})
+        assert [s["id"] for s in default.json()["sessions"]] == ["default-store-row"]

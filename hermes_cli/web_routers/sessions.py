@@ -167,18 +167,26 @@ def get_sessions(
     limit: int = Query(20, ge=0, le=100), offset: int = Query(0, ge=0), min_messages: int = 0,
     archived: str = "exclude", order: str = "created", source: str = None, sources: str = None,
     exclude_sources: str = None, cwd_prefix: str = None, full: bool = False,
-    profile: Optional[str] = None):
+    peer_id: str = None, profile: Optional[str] = None):
     """List sessions.
 
     ``order=recent`` sorts by latest activity across the compression chain, so
     a long-running chat stays on page one after it auto-compresses onto a fresh
     id.  Rows omit ``system_prompt`` / ``model_config`` unless ``full=1``.
+    ``peer_id`` narrows an exact Feishu source selection to one peer; anything
+    else paired with it is a client bug, not a partial match.
     """
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(
             status_code=400, detail="archived must be one of: exclude, only, include")
     if order not in ("created", "recent"):
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
+    if peer_id and source != "feishu":
+        # Deliberately narrower than "peer_id is plausible": sources=feishu (single
+        # or multi) and source-less calls are rejected too, so a UI that starts
+        # sending peer filters for a non-exact selection fails loudly here rather
+        # than silently listing the wrong rows.
+        raise HTTPException(status_code=400, detail="peer_id requires source=feishu")
     profile_name = _cron_profile_home(profile)[0] if profile else None
     try:
         # Auto-archive is the only write on this GET path: run it on its own
@@ -197,7 +205,7 @@ def get_sessions(
                 source=source or None, sources=source_list or None,
                 exclude_sources=exclude_list or None, cwd_prefix=(cwd_prefix or None),
                 min_message_count=min_message_count, include_archived=include_archived,
-                archived_only=archived_only)
+                archived_only=archived_only, peer_id=peer_id or None)
             sessions = db.list_sessions_rich(
                 limit=limit,
                 offset=offset,
@@ -456,17 +464,29 @@ async def delete_empty_sessions_endpoint(profile: Optional[str] = None):
 
 @manage_router.get("/api/sessions/stats")
 async def get_session_stats(profile: Optional[str] = None):
-    """Session-store statistics (mirrors `hermes sessions stats`)."""
+    """Session-store statistics (mirrors `hermes sessions stats`).
+
+    ``by_peer`` is additive and Feishu-only, scoped like ``by_source`` (archived
+    included, children hidden) so the dashboard's peer selector counts match the
+    source counts it sits next to. Aggregate-only: this path never lists rows.
+    """
     def _stats(db):
         out = {
             "total": db.session_count(include_archived=True),
             "active_store": db.session_count(include_archived=False),
             "archived": db.session_count(archived_only=True), "messages": db.message_count(),
-            "by_source": {}}
+            "by_source": {}, "by_peer": []}
         try:
             out["by_source"] = db.session_count_by_source(
                 include_archived=True, exclude_children=True)
         except Exception:
+            pass
+        try:
+            out["by_peer"] = db.session_count_by_peer(
+                include_archived=True, exclude_children=True)
+        except Exception:
+            # An old store without JSON1 (or mid-upgrade) loses the peer
+            # selector, not the whole stats endpoint.
             pass
         return out
 

@@ -527,7 +527,46 @@ class TestSessionManagementEndpoints:
         body = r.json()
         assert body["by_source"]["cli"] >= 1
 
+    def test_stats_peer_counts_use_direct_aggregate(self, monkeypatch):
+        """by_peer rides the same aggregate-only rule as by_source."""
+        from hermes_state import SessionDB
 
+        def fail_list_sessions_rich(self, *args, **kwargs):
+            raise AssertionError("stats should never materialise rows for peer counts")
+
+        monkeypatch.setattr(SessionDB, "list_sessions_rich", fail_list_sessions_rich)
+
+        r = self.client.get("/api/sessions/stats")
+        assert r.status_code == 200
+        assert r.json()["by_peer"] == []
+
+    def test_stats_by_peer_buckets_and_existing_fields(self):
+        """by_peer is additive: every pre-existing stats field survives, and the
+        modern / legacy / unknown identity buckets are all represented."""
+        import json as _json
+
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="modern", source="feishu",
+                              origin_json=_json.dumps(
+                                  {"user_id_alt": "on_alice", "user_name": "Alice"}))
+            db.create_session(session_id="legacy", source="feishu", user_id="legacy-id")
+            db.create_session(session_id="mystery", source="feishu")
+        finally:
+            db.close()
+
+        r = self.client.get("/api/sessions/stats")
+        assert r.status_code == 200
+        body = r.json()
+        for field in ("total", "active_store", "archived", "messages", "by_source"):
+            assert field in body
+        assert body["by_peer"] == [
+            {"peer_id": "__unknown__", "user_name": None, "count": 1},
+            {"peer_id": "legacy-id", "user_name": None, "count": 1},
+            {"peer_id": "on_alice", "user_name": "Alice", "count": 1},
+        ]
 
     def test_prune_attr_filter_suppresses_default_cutoff(self):
         # An attribute filter without an explicit older_than_days matches all
