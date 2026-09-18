@@ -152,3 +152,158 @@ describe("SessionsPage per-row profile routing (#99387)", () => {
     expect(apiMocks.deleteSession).toHaveBeenCalledWith("sid-guanli", "guanli");
   });
 });
+
+describe("SessionsPage Feishu peer filter", () => {
+  const PEER_STATS = {
+    total: 27,
+    active_store: 27,
+    archived: 0,
+    messages: 10,
+    by_source: { feishu: 25, cli: 2 },
+    by_peer: [
+      { peer_id: "on_alice", user_name: "Alice", count: 3 },
+      { peer_id: "d1d48edf", user_name: null, count: 2 },
+      { peer_id: "__unknown__", user_name: null, count: 1 },
+    ],
+  };
+
+  function feishuRow(id: string, overrides: Record<string, unknown> = {}) {
+    return {
+      id, profile: "", source: "feishu", model: null, title: id, started_at: 1,
+      ended_at: null, last_active: 1, is_active: false, message_count: 1,
+      tool_call_count: 0, input_tokens: 0, output_tokens: 0, preview: "p",
+      ...overrides,
+    };
+  }
+
+  function renderWithPeers(rows: Record<string, unknown>[]) {
+    apiMocks.getSessionStats.mockResolvedValue(PEER_STATS);
+    return renderSessionsPage(rows);
+  }
+
+  // The chats category starts with an IMPLICIT selection (null = every chat
+  // source, both checkboxes checked). Deselecting CLI is the deterministic
+  // path to an explicit selection of exactly feishu.
+  async function selectExactFeishuSource() {
+    await act(async () => click(button("Session source")));
+    await waitFor(() =>
+      Boolean(document.querySelector('button[aria-label="Session source: CLI"]')),
+    );
+    await act(async () =>
+      click(document.querySelector('button[aria-label="Session source: CLI"]')),
+    );
+    await waitFor(() => Boolean(button("Feishu peer filter")));
+    // Leave the source menu closed so later steps can toggle it afresh.
+    await act(async () => click(button("Session source")));
+  }
+
+  function lastQueryOptions() {
+    const calls = apiMocks.getSessions.mock.calls;
+    return calls[calls.length - 1][2] as Record<string, unknown>;
+  }
+
+  it("renders the peer selector only under an exact Feishu source selection", async () => {
+    await renderWithPeers([feishuRow("f1")]);
+    expect(button("Feishu peer filter")).toBeNull();
+    await selectExactFeishuSource();
+    expect(button("Feishu peer filter")).not.toBeNull();
+  });
+
+  it("sends the selected peerId to getSessions", async () => {
+    await renderWithPeers([feishuRow("f1"), feishuRow("f2")]);
+    await selectExactFeishuSource();
+    await act(async () => click(button("Feishu peer filter")));
+    await waitFor(() =>
+      Boolean(document.querySelector('button[aria-label="Feishu peer: Alice"]')),
+    );
+    await act(async () =>
+      click(document.querySelector('button[aria-label="Feishu peer: Alice"]')),
+    );
+    await waitFor(() => lastQueryOptions().peerId === "on_alice");
+    expect(lastQueryOptions()).toMatchObject({ source: "feishu", peerId: "on_alice" });
+  });
+
+  it("clears the peer filter when the source selection moves off exact Feishu", async () => {
+    await renderWithPeers([feishuRow("f1")]);
+    await selectExactFeishuSource();
+    await act(async () => click(button("Feishu peer filter")));
+    await waitFor(() =>
+      Boolean(document.querySelector('button[aria-label="Feishu peer: Alice"]')),
+    );
+    await act(async () =>
+      click(document.querySelector('button[aria-label="Feishu peer: Alice"]')),
+    );
+    await waitFor(() => lastQueryOptions().peerId === "on_alice");
+
+    // Deselect Feishu itself: the selection moves to cli only, so the peer
+    // selector must disappear and no peer id may ride along.
+    await act(async () => click(button("Session source")));
+    await waitFor(() =>
+      Boolean(document.querySelector('button[aria-label="Session source: Feishu"]')),
+    );
+    await act(async () =>
+      click(document.querySelector('button[aria-label="Session source: Feishu"]')),
+    );
+    await waitFor(() => button("Feishu peer filter") === null);
+    expect("peerId" in lastQueryOptions()).toBe(false);
+  });
+
+  it("hides the peer selector for multi-source selections", async () => {
+    await renderWithPeers([feishuRow("f1")]);
+    await selectExactFeishuSource();
+    expect(button("Feishu peer filter")).not.toBeNull();
+    // Re-adding CLI turns the selection into feishu+cli (multi).
+    await act(async () => click(button("Session source")));
+    await waitFor(() =>
+      Boolean(document.querySelector('button[aria-label="Session source: CLI"]')),
+    );
+    await act(async () =>
+      click(document.querySelector('button[aria-label="Session source: CLI"]')),
+    );
+    await waitFor(() => button("Feishu peer filter") === null);
+  });
+
+  it("falls back to the raw peer id when user_name is missing", async () => {
+    await renderWithPeers([feishuRow("f1")]);
+    await selectExactFeishuSource();
+    await act(async () => click(button("Feishu peer filter")));
+    await waitFor(() =>
+      Boolean(document.querySelector('button[aria-label="Feishu peer: d1d48edf"]')),
+    );
+  });
+
+  it("displays the __unknown__ bucket as Unknown peer", async () => {
+    await renderWithPeers([feishuRow("f1")]);
+    await selectExactFeishuSource();
+    await act(async () => click(button("Feishu peer filter")));
+    await waitFor(() =>
+      Boolean(document.querySelector('button[aria-label="Feishu peer: Unknown peer"]')),
+    );
+  });
+
+  it("resets pagination and bulk selection when the peer changes", async () => {
+    const rows = Array.from({ length: 25 }, (_, i) => feishuRow(`f${i}`));
+    await renderWithPeers(rows);
+    await selectExactFeishuSource();
+
+    // Onto page 2 (offset 20), then select one row.
+    await act(async () => click(button("Next page")));
+    await waitFor(() => apiMocks.getSessions.mock.calls.at(-1)![1] === 20);
+    const checkboxes = document.querySelectorAll('button[aria-label="Select session"]');
+    await act(async () => click(checkboxes[0]));
+    await waitFor(() => Boolean(document.querySelector('[aria-label="1 selected"]')));
+
+    // Choosing a peer jumps back to offset 0 and drops the invisible-row
+    // selection.
+    await act(async () => click(button("Feishu peer filter")));
+    await waitFor(() =>
+      Boolean(document.querySelector('button[aria-label="Feishu peer: Alice"]')),
+    );
+    await act(async () =>
+      click(document.querySelector('button[aria-label="Feishu peer: Alice"]')),
+    );
+    await waitFor(() => lastQueryOptions().peerId === "on_alice");
+    await waitFor(() => apiMocks.getSessions.mock.calls.at(-1)![1] === 0);
+    expect(document.querySelector('[aria-label="1 selected"]')).toBeNull();
+  });
+});

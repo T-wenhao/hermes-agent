@@ -43,6 +43,7 @@ import type {
   SessionInfo,
   SessionMessage,
   SessionSearchResult,
+  SessionPeerStats,
   SessionStoreStats,
   StatusResponse,
 } from "@/lib/api";
@@ -125,8 +126,18 @@ function sourceBelongsToCategory(
   return !isAutomationSource(source);
 }
 
-function sourceLabel(source: string): string {
-  switch (source) {
+// Reserved peer bucket for Feishu rows with no usable identity (mirrors the
+// backend's SessionDB.UNKNOWN_PEER_ID).
+const UNKNOWN_PEER_ID = "__unknown__";
+
+function feishuPeerLabel(peer: SessionPeerStats): string {
+  return (
+    peer.user_name ||
+    (peer.peer_id === UNKNOWN_PEER_ID ? "Unknown peer" : peer.peer_id)
+  );
+}
+
+function sourceLabel(source: string): string {  switch (source) {
     case "api_server":
       return "API server";
     case "acp":
@@ -839,6 +850,14 @@ export default function SessionsPage() {
     });
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
   const sourceMenuRef = useRef<HTMLDivElement | null>(null);
+  // Feishu per-peer filter. Only meaningful while the source selection is
+  // EXACTLY feishu (single source); any other selection hides the selector
+  // and the peer id is dropped from the query outright.
+  const [selectedFeishuPeer, setSelectedFeishuPeer] = useState<string | null>(
+    null,
+  );
+  const [peerMenuOpen, setPeerMenuOpen] = useState(false);
+  const peerMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionsRequestRef = useRef(0);
   // Count of empty (no-message, ended, non-archived) sessions across the
   // entire DB, populated by /api/sessions/empty/count. Used to:
@@ -875,6 +894,8 @@ export default function SessionsPage() {
   const { activeAction, actionStatus, dismissLog } = useSystemActions();
   const resumeInChatEnabled = isDashboardEmbeddedChatEnabled();
   const selectedSources = sourceSelectionsByCategory[sessionCategory];
+  const isExactFeishuSource =
+    selectedSources?.length === 1 && selectedSources[0] === "feishu";
 
   const pinnedSourceSelections = useMemo(
     () =>
@@ -904,7 +925,7 @@ export default function SessionsPage() {
     [allSourceOptions],
   );
 
-  const sessionQueryOptions = useMemo(() => {
+  const baseSessionQueryOptions = useMemo(() => {
     if (selectedSources !== null) {
       if (selectedSources.length === 0) {
         return allSourceNames.length > 0
@@ -933,6 +954,35 @@ export default function SessionsPage() {
     }
     return {};
   }, [selectedSources, sessionCategory, allSourceNames]);
+
+  // The peer id rides along ONLY under an exact Feishu selection; anything
+  // else would 400 on the list endpoint, and a stale id could silently
+  // narrow an unscoped view.
+  const sessionQueryOptions = useMemo(() => {
+    if (!isExactFeishuSource) return baseSessionQueryOptions;
+    return {
+      ...baseSessionQueryOptions,
+      peerId: selectedFeishuPeer ?? undefined,
+    };
+  }, [baseSessionQueryOptions, isExactFeishuSource, selectedFeishuPeer]);
+
+  const feishuPeerOptions = useMemo(() => {
+    return [...(stats?.by_peer ?? [])].sort(
+      (a, b) =>
+        b.count - a.count ||
+        feishuPeerLabel(a).localeCompare(feishuPeerLabel(b)) ||
+        a.peer_id.localeCompare(b.peer_id),
+    );
+  }, [stats]);
+
+  const selectedFeishuPeerLabel = useMemo(() => {
+    if (!selectedFeishuPeer) return "All Feishu peers";
+    if (selectedFeishuPeer === UNKNOWN_PEER_ID) return "Unknown peer";
+    return (
+      stats?.by_peer?.find((peer) => peer.peer_id === selectedFeishuPeer)
+        ?.user_name || selectedFeishuPeer
+    );
+  }, [selectedFeishuPeer, stats]);
 
   const categoryDefaultSources = useMemo(() => {
     return allSourceNames.filter((source) =>
@@ -1037,6 +1087,21 @@ export default function SessionsPage() {
       document.removeEventListener("pointerdown", handlePointerDown);
     };
   }, [sourceMenuOpen]);
+
+  useEffect(() => {
+    if (!peerMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!peerMenuRef.current?.contains(event.target as Node)) {
+        setPeerMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [peerMenuOpen]);
 
   const loadSessions = useCallback((p: number, silent = false) => {
     // ``silent`` skips the loading spinner so background refreshes
@@ -1205,6 +1270,11 @@ export default function SessionsPage() {
     (value: string) => {
       setSessionCategory(value as SessionFilterCategory);
       setSourceMenuOpen(false);
+      setPeerMenuOpen(false);
+      // The peer selector only exists under exact-Feishu + a category that
+      // surfaces sources; switching category re-derives the selection, so a
+      // stale peer id must not silently survive.
+      setSelectedFeishuPeer(null);
       setPage(0);
       setExpandedId(null);
       clearSelection();
@@ -1230,6 +1300,11 @@ export default function SessionsPage() {
           [sessionCategory]: nextSelection,
         };
       });
+      // Any source toggle changes the selection shape (even a re-click on
+      // feishu deselects it); drop the peer so it can never outlive the
+      // exact-Feishu state it is only valid under.
+      setSelectedFeishuPeer(null);
+      setPeerMenuOpen(false);
       setPage(0);
       setExpandedId(null);
       clearSelection();
@@ -1242,10 +1317,23 @@ export default function SessionsPage() {
       ...currentByCategory,
       [sessionCategory]: null,
     }));
+    setSelectedFeishuPeer(null);
+    setPeerMenuOpen(false);
     setPage(0);
     setExpandedId(null);
     clearSelection();
   }, [clearSelection, sessionCategory]);
+
+  const updateFeishuPeer = useCallback(
+    (peerId: string | null) => {
+      setSelectedFeishuPeer(peerId);
+      setPeerMenuOpen(false);
+      setPage(0);
+      setExpandedId(null);
+      clearSelection();
+    },
+    [clearSelection],
+  );
 
   // Debounced FTS search
   useEffect(() => {
@@ -1917,6 +2005,81 @@ export default function SessionsPage() {
                 </div>
               )}
             </div>
+
+            {isExactFeishuSource && (
+              <div ref={peerMenuRef} className="relative shrink-0">
+                <Button
+                  outlined
+                  size="sm"
+                  prefix={<MessageCircle />}
+                  suffix={
+                    <ChevronDown
+                      className={`transition-transform ${peerMenuOpen ? "rotate-180" : ""}`}
+                    />
+                  }
+                  className="h-8 min-w-[10rem] max-w-[14rem] justify-between text-xs"
+                  aria-label="Feishu peer filter"
+                  aria-expanded={peerMenuOpen}
+                  onClick={() => setPeerMenuOpen((open) => !open)}
+                >
+                  <span className="min-w-0 truncate">{selectedFeishuPeerLabel}</span>
+                </Button>
+
+                {peerMenuOpen && (
+                  <div
+                    className="absolute left-0 top-full z-30 mt-1 w-[18rem] max-w-[calc(100vw-2rem)] border border-border bg-background-base shadow-lg"
+                  >
+                    <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
+                      <span className="min-w-0 truncate text-xs text-muted-foreground">
+                        Feishu peers
+                      </span>
+                      {selectedFeishuPeer !== null && (
+                        <Button
+                          ghost
+                          size="xs"
+                          onClick={() => updateFeishuPeer(null)}
+                          className="shrink-0"
+                        >
+                          {t.common.clear}
+                        </Button>
+                      )}
+                    </div>
+                    <div className="max-h-64 overflow-y-auto p-1">
+                      {feishuPeerOptions.length === 0 ? (
+                        <div className="px-2 py-2 text-xs text-muted-foreground">
+                          No Feishu peers
+                        </div>
+                      ) : (
+                        feishuPeerOptions.map((peer) => {
+                          const selected = peer.peer_id === selectedFeishuPeer;
+                          return (
+                            <button
+                              key={peer.peer_id}
+                              type="button"
+                              className={`flex min-w-0 w-full items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-secondary/40 ${selected ? "bg-secondary/60" : ""}`}
+                              onClick={() =>
+                                updateFeishuPeer(selected ? null : peer.peer_id)
+                              }
+                              aria-label={`Feishu peer: ${feishuPeerLabel(peer)}`}
+                            >
+                              <Check
+                                className={`h-3.5 w-3.5 shrink-0 ${selected ? "opacity-100" : "opacity-0"}`}
+                              />
+                              <span className="min-w-0 flex-1 truncate">
+                                {feishuPeerLabel(peer)}
+                              </span>
+                              <span className="shrink-0 tabular-nums text-muted-foreground">
+                                {peer.count}
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {showOverviewTab && !isSearching && (
               <Segmented
