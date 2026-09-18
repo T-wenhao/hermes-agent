@@ -200,3 +200,59 @@ describe("api OAuth helpers", () => {
     ]);
   });
 });
+
+describe("Feishu peer session filtering client support", () => {
+  function urlForGetSessions(options: Parameters<typeof api.getSessions>[2]) {
+    const fetchMock = jsonFetchMock({ sessions: [], total: 0 });
+    vi.stubGlobal("fetch", fetchMock);
+    return api.getSessions(20, 0, options).then(() => {
+      setManagementProfile("");
+      return fetchMock.mock.calls[0][0] as string;
+    });
+  }
+
+  it("appends peer_id alongside an exact feishu source", async () => {
+    await expect(
+      urlForGetSessions({ source: "feishu", peerId: "on_alice" }),
+    ).resolves.toContain("source=feishu&peer_id=on_alice");
+  });
+
+  it("URL-encodes opaque peer ids", async () => {
+    await expect(
+      urlForGetSessions({ source: "feishu", peerId: "on/abc 123&x=1" }),
+    ).resolves.toContain(`peer_id=${encodeURIComponent("on/abc 123&x=1")}`);
+  });
+
+  it("omits peer_id when not requested and keeps existing filters intact", async () => {
+    const url = await urlForGetSessions({
+      profile: "worker",
+      source: "telegram",
+      excludeSources: ["cron"],
+    });
+    expect(url).not.toContain("peer_id");
+    expect(url).toContain("source=telegram");
+    expect(url).toContain("exclude_sources=cron");
+    expect(url).toContain("profile=worker");
+  });
+
+  it("stats callers tolerate a missing by_peer field", () => {
+    // Type-level compatibility: SessionStoreStats.by_peer is optional, so an
+    // old backend payload without it still satisfies the interface.
+    const legacyStats: import("./api").SessionStoreStats = {
+      total: 1,
+      active_store: 1,
+      archived: 0,
+      messages: 5,
+      by_source: { cli: 1 },
+    };
+    expect(legacyStats.by_peer).toBeUndefined();
+    const withPeer: import("./api").SessionStoreStats = {
+      ...legacyStats,
+      by_peer: [
+        { peer_id: "on_alice", user_name: "Alice", count: 3 },
+        { peer_id: "__unknown__", user_name: null, count: 1 },
+      ],
+    };
+    expect(withPeer.by_peer?.[0].count).toBe(3);
+  });
+});

@@ -314,6 +314,8 @@ export interface SessionQueryOptions {
   source?: string | null;
   sources?: string[];
   excludeSources?: string[];
+  // Feishu-only peer bucket; the backend rejects it without source === "feishu".
+  peerId?: string;
 }
 
 function normalizeSessionQueryOptions(
@@ -339,6 +341,7 @@ function appendSessionFilters(url: string, options: SessionQueryOptions): string
   if (options.excludeSources && options.excludeSources.length > 0) {
     next = appendQueryParam(next, "exclude_sources", options.excludeSources.join(","));
   }
+  next = appendQueryParam(next, "peer_id", options.peerId);
   return appendProfileParam(next, options.profile);
 }
 
@@ -1396,12 +1399,23 @@ export interface DebugShareResponse {
   auto_delete_seconds: number;
 }
 
+/** One Feishu peer bucket of the stats endpoint's by_peer aggregate. */
+export interface SessionPeerStats {
+  peer_id: string;
+  // Presentation-only: origin_json.user_name, else null (UI falls back to the
+  // peer id / "Unknown peer").
+  user_name: string | null;
+  count: number;
+}
+
 export interface SessionStoreStats {
   total: number;
   active_store: number;
   archived: number;
   messages: number;
   by_source: Record<string, number>;
+  // Optional: older dashboard backends don't send it.
+  by_peer?: SessionPeerStats[];
 }
 
 export interface SessionImportResponse {
