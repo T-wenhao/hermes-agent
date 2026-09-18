@@ -16,7 +16,8 @@ from agent.session_activity import (
 from hermes_state_common import (
     _LISTABLE_CHILD_SQL, _PREVIEW_ELIGIBLE_SQL, _PREVIEW_RAW_SELECT, _RECOVERABLE_END_REASONS,
     _RECOVERABLE_END_REASONS_SQL, _RESET_END_REASONS, _legacy_reset_child_sql, _shape_preview,
-    _sql_json_extract, _sql_session_last_active, _sql_session_last_active_by_id, escape_like as _escape_like,
+    _sql_json_extract, _sql_session_last_active, _sql_session_last_active_by_id,
+    _sql_trim_whitespace, escape_like as _escape_like,
     _SQL_IN_CHUNK, _id_chunks, _placeholders as _session_ids_placeholders,
 )
 
@@ -86,6 +87,26 @@ _PREVIEW_COL_SQL = f"""COALESCE(
 def _where_sql(clauses: List[str], lead: str = "") -> str:
     """``WHERE a AND b`` (with *lead* prefix) or "" when there are no clauses."""
     return f"{lead}WHERE {' AND '.join(clauses)}" if clauses else ""
+
+
+# Reserved, externally visible peer bucket for Feishu rows with no usable identity
+# (no origin marker, no column user_id). Peers never collapse into "" or NULL.
+UNKNOWN_PEER_ID = "__unknown__"
+
+# Canonical Feishu peer identity for a ``sessions s`` row: origin marker
+# ``user_id_alt`` wins, then the origin's primary id, then the row column, then
+# the reserved ``__unknown__`` bucket. Built only from malformed-safe JSON
+# extraction (``json_valid``-guarded) so a corrupt ``origin_json`` degrades to a
+# fallback instead of failing the whole list/stats query. One shared expression
+# for filtering, counting, and aggregation so those paths cannot diverge on who
+# "the same peer" is. Blank/whitespace-only candidates don't count as identities.
+_FEISHU_CANONICAL_PEER_SQL = (
+    f"COALESCE("
+    f"NULLIF({_sql_trim_whitespace(_sql_json_extract('s.origin_json', '$.user_id_alt'))}, ''), "
+    f"NULLIF({_sql_trim_whitespace(_sql_json_extract('s.origin_json', '$.user_id'))}, ''), "
+    f"NULLIF({_sql_trim_whitespace('s.user_id')}, ''), "
+    f"'{UNKNOWN_PEER_ID}')"
+)
 
 
 def _session_filter_where(
