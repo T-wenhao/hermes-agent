@@ -1,0 +1,121 @@
+name: Release Desktop Clients
+
+# Fork-only packaging pipeline. Builds the desktop client installers from a
+# locked ref (an official release tag, NOT main) on macOS and Windows runners,
+# then uploads both artifacts to a single pre-release. Dispatch manually:
+#   gh workflow run release-desktop.yml --ref main
+# Re-running the same release_tag UPDATES the existing pre-release in place
+# (assets are replaced with --clobber); it never creates duplicate releases.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (tag or commit SHA)'
+        required: false
+        default: 'v2026.9.14'
+      release_tag:
+        description: 'Name of the pre-release to publish to'
+        required: false
+        default: 'v2026.9.14'
+
+# At most one packaging pipeline at a time: extra dispatches queue instead of
+# running in parallel. cancel-in-progress stays false so a running build is
+# never killed and queued runs are never dropped.
+concurrency:
+  group: release-desktop-clients
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build installer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            dist_script: dist:mac:dmg
+            artifact: apps/desktop/release/*.dmg
+          - os: windows-latest
+            dist_script: dist:win:nsis
+            artifact: apps/desktop/release/*.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout the build ref (locked tag, not main)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Node 26
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      # .npmrc sets engine-strict=true with npm <11.10.0 || >=11.17.0, and the
+      # npm bundled with Node 26 can fall inside the forbidden band.
+      - name: Upgrade npm to 12
+        run: npm i -g npm@12
+
+      # Full install, lifecycle scripts included: electron's postinstall
+      # downloads the binary electron-builder packages, node-pty compiles its
+      # native module, get-windows fetches its prebuilt binding.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer
+        working-directory: apps/desktop
+        env:
+          # No code-signing identity on this fork: build unsigned. The
+          # afterSign hook (notarize.mjs) skips itself when Apple credentials
+          # are absent.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run ${{ matrix.dist_script }}
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.os }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish to pre-release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download built installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          merge-multiple: true
+          path: installers
+
+      - name: Create the pre-release if missing, then upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUILD_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<NOTES
+          Desktop installers built from ${BUILD_REF} (official release tag v2026.9.14, commit 345cd2b0).
+
+          Unsigned builds:
+          - macOS (arm64 dmg): on first launch, right-click the app and choose Open.
+          - Windows (NSIS exe): SmartScreen may warn - choose More info, then Run anyway.
+          NOTES
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --target "$BUILD_REF" \
+              --prerelease \
+              --title "Hermes Desktop Clients $RELEASE_TAG (pre-release)" \
+              --notes-file release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" installers/* --clobber
