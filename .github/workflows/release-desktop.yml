@@ -90,6 +90,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # gh release create shells out to git for tag targeting; without a
+      # checkout it fails with "fatal: not a git repository".
+      - name: Checkout repository at the build ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
       - name: Download built installers
         uses: actions/download-artifact@v4
         with:
