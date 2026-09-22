@@ -67,6 +67,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Without this, electron-builder skips signing entirely and the packed
+      # app keeps Electron's stale linker-signed bundle signature. Gatekeeper
+      # then reports a quarantined copy as DAMAGED ("已损坏"). mac.identity=-
+      # re-signs the bundle ad-hoc: verdict drops to the recoverable
+      # "unidentified developer" (right-click → Open). Verified locally:
+      # codesign --verify --deep --strict passes on the packed app.
+      - name: Force ad-hoc code signing (macOS)
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop
+        run: npm pkg set build.mac.identity=-
+
       - name: Build installer
         working-directory: apps/desktop
         env:
@@ -114,7 +125,7 @@ jobs:
           cat > release-notes.md <<NOTES
           Desktop installers built from ${BUILD_REF} (official release tag v2026.9.14, commit 345cd2b0).
 
-          Unsigned builds:
+          Ad-hoc signed builds (no Apple Developer ID / notarization):
           - macOS (arm64 dmg): on first launch, right-click the app and choose Open.
           - Windows (NSIS exe): SmartScreen may warn - choose More info, then Run anyway.
           NOTES
