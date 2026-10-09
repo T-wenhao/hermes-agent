@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'vitest'
 
 import {
@@ -48,10 +52,10 @@ test('fromFallback uses the all-zero placeholder commit', () => {
   assert.equal(isFallbackCommit('a'.repeat(40)), false)
 })
 
-test('resolveStamp prefers CI over local git over fallback', () => {
+test('resolveStamp uses CI when the checkout is unavailable and git for local builds', () => {
   const ci = resolveStamp({
     env: { GITHUB_SHA: 'c'.repeat(40), GITHUB_REF_NAME: 'main' },
-    execFn: () => 'should-not-run'
+    execFn: () => null
   })
   assert.equal(ci.source, 'ci')
   assert.equal(ci.commit, 'c'.repeat(40))
@@ -78,4 +82,33 @@ test('resolveStamp falls back when neither CI nor git is available', () => {
     dirty: false,
     source: 'fallback'
   })
+})
+
+test('CI stamp follows the checked-out source when a manual run selects another commit', () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'desktop-stamp-'))
+  const git = (...args) => execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' }).trim()
+  try {
+    git('init', '-b', 'main')
+    writeFileSync(join(repoRoot, 'source.txt'), 'selected source')
+    git('add', 'source.txt')
+    git('-c', 'user.name=Desktop Test', '-c', 'user.email=desktop-test@example.invalid', 'commit', '-m', 'source')
+    const selected = git('rev-parse', 'HEAD')
+    git('checkout', '--detach', selected)
+    const stamp = resolveStamp({ repoRoot, env: { GITHUB_SHA: 'f'.repeat(40), GITHUB_REF_NAME: 'main' } })
+    assert.equal(stamp.commit, selected, 'The package must identify its source, not the workflow trigger')
+    assert.equal(stamp.branch, null, 'A different workflow branch does not own the selected source')
+    assert.equal(stamp.source, 'ci')
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true })
+  }
+})
+
+test('a detached CI checkout keeps its branch hint only when the event commit matches', () => {
+  const commit = 'e'.repeat(40)
+  const stamp = resolveStamp({
+    env: { GITHUB_SHA: commit, GITHUB_REF_NAME: 'custom/home' },
+    execFn: cmd => cmd === 'git rev-parse HEAD' ? commit : cmd === 'git rev-parse --abbrev-ref HEAD' ? 'HEAD' : ' M package.json'
+  })
+  assert.equal(stamp.branch, 'custom/home')
+  assert.equal(stamp.dirty, true, 'CI packaging must not conceal modified tracked files')
 })
