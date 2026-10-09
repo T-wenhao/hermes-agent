@@ -15,9 +15,9 @@
  *   }
  *
  * Source preference order:
- *   1. CI env vars ($GITHUB_SHA / $GITHUB_REF_NAME) -- avoid edge cases with
- *      shallow clones, detached HEADs, etc. in CI.
- *   2. Local `git rev-parse` against the parent repo (../..).
+ *   1. Checked-out HEAD: a manual CI run can build a different ref from
+ *      the workflow event's $GITHUB_SHA.
+ *   2. CI env vars, only when the checkout cannot be read.
  *   3. Fallback stamp for local/personal builds from non-git source trees
  *      (ZIP extract, interrupted clone with no HEAD, etc.).
  *
@@ -107,7 +107,16 @@ export function resolveStamp({
   execFn = tryExec,
   fallbackBranch = FALLBACK_BRANCH
 } = {}) {
-  return fromCI(env) || fromLocalGit(repoRoot, execFn) || fromFallback(fallbackBranch)
+  const ci = fromCI(env)
+  const checkout = fromLocalGit(repoRoot, execFn)
+  if (!checkout) return ci || fromFallback(fallbackBranch)
+  return {
+    ...checkout,
+    // A detached checkout may use the event's branch only if both identify
+    // the same source. Otherwise a manual build would inherit main's identity.
+    branch: checkout.branch ?? (ci?.commit === checkout.commit ? ci.branch : null),
+    source: ci ? 'ci' : checkout.source
+  }
 }
 
 export function isFallbackCommit(commit) {
