@@ -2,8 +2,8 @@
 
 `Release Desktop Clients` builds this fork's installers on GitHub Actions.
 
-- A push to `custom/home` automatically builds a macOS arm64 DMG.
-- Manual runs can select a source branch, tag or commit and `mac`, `windows`, or `both`.
+- A push to `custom/home` automatically builds a macOS arm64 DMG and a Windows x64 NSIS installer.
+- Manual runs default to both platforms and can select a source branch, tag or commit and `mac`, `windows`, or `both`.
 - The source is resolved to one commit before the platform builds start.
 - Releases use `desktop-<branch>-v<app-version>-<source-sha>` tags by default. The app version comes from `apps/desktop/package.json`; it is independent of the Python backend version.
 - Each release includes the installer and a `desktop-<platform>-build.json` receipt with the actual source commit, branch, app version and run URL.
