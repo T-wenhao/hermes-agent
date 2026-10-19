@@ -10,8 +10,8 @@ on:
         default: custom/home
         type: string
       platforms:
-        description: Installers to build (automatic Home pushes build Mac only)
-        default: mac
+        description: Installers to build (automatic Home pushes build both platforms)
+        default: both
         type: choice
         options: [mac, windows, both]
       release_tag:
@@ -46,7 +46,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_BRANCH: ${{ github.ref_name }}
-          PLATFORMS: ${{ inputs.platforms || 'mac' }}
+          PLATFORMS: ${{ inputs.platforms || 'both' }}
           REQUESTED_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
