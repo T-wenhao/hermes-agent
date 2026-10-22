@@ -5,8 +5,8 @@ on:
     branches: [custom/home]
   workflow_dispatch:
     inputs:
-      ref:
-        description: Source branch, tag or commit to build
+      source_ref:
+        description: Upgraded Home/DITT branch, tag or commit to build
         default: custom/home
         type: string
       platforms:
@@ -36,40 +36,31 @@ jobs:
       release_tag: ${{ steps.source.outputs.release_tag }}
       matrix: ${{ steps.source.outputs.matrix }}
     steps:
+      - name: Load the release controller from the workflow revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: .release-controller
+          sparse-checkout: |
+            apps/desktop/scripts
+            apps/desktop/fork-release.json
+          sparse-checkout-cone-mode: false
       - name: Resolve the selected source once
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'push' && github.sha || inputs.ref || 'custom/home' }}
+          ref: ${{ github.event_name == 'push' && github.sha || inputs.source_ref || 'custom/home' }}
+          path: source
+          fetch-depth: 0
       - id: source
         name: Pin source, version and installer platforms
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_BRANCH: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
           PLATFORMS: ${{ inputs.platforms || 'both' }}
           REQUESTED_TAG: ${{ inputs.release_tag }}
-        run: |
-          set -euo pipefail
-          commit="$(git rev-parse HEAD)"
-          branch="$(git symbolic-ref --short -q HEAD || true)"
-          if [[ "$EVENT_NAME" == push ]]; then branch="$EVENT_BRANCH"; fi
-          version="$(node -p "require('./apps/desktop/package.json').version")"
-          channel="${branch//\//-}"
-          tag="${REQUESTED_TAG:-desktop-${channel:-manual}-v${version}-${commit:0:12}}"
-          [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo 'Invalid release tag'; exit 1; }
-          case "$PLATFORMS" in
-            mac) matrix='{"include":[{"os":"macos-latest","platform":"mac","artifact":"apps/desktop/release/*.dmg"}]}' ;;
-            windows) matrix='{"include":[{"os":"windows-latest","platform":"windows","artifact":"apps/desktop/release/*.exe"}]}' ;;
-            both) matrix='{"include":[{"os":"macos-latest","platform":"mac","artifact":"apps/desktop/release/*.dmg"},{"os":"windows-latest","platform":"windows","artifact":"apps/desktop/release/*.exe"}]}' ;;
-            *) echo 'Invalid installer platform'; exit 1 ;;
-          esac
-          {
-            printf 'commit=%s\n' "$commit"
-            printf 'branch=%s\n' "$branch"
-            printf 'version=%s\n' "$version"
-            printf 'release_tag=%s\n' "$tag"
-            printf 'matrix=%s\n' "$matrix"
-          } >> "$GITHUB_OUTPUT"
+        run: node .release-controller/apps/desktop/scripts/fork-release.mjs source source
 
   build:
     name: Build installer (${{ matrix.platform }})
@@ -78,15 +69,29 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.source.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: source
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ needs.source.outputs.commit }}
+          path: source
+      - name: Load the same release controller
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: .release-controller
+          sparse-checkout: |
+            apps/desktop/scripts
+            apps/desktop/fork-release.json
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 26
           cache: npm
+          cache-dependency-path: source/package-lock.json
       - name: Install locked workspace dependencies
         shell: bash
         run: |
@@ -95,15 +100,17 @@ jobs:
       - name: Verify the client approval protocol and build metadata
         shell: bash
         run: |
+          node --test ../.release-controller/apps/desktop/scripts/fork-release.node-test.mjs
           npm exec -- vitest run apps/shared/src/json-rpc-channel.test.ts
           cd apps/desktop
           npm exec -- vitest run scripts/write-build-stamp.test.mjs src/app/session/hooks/use-message-stream/gateway-event/server-requests.test.ts src/components/assistant-ui/tool/approval.test.tsx
       - name: Build the pinned installer
-        working-directory: apps/desktop
+        working-directory: source/apps/desktop
         shell: bash
         env:
           SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
           SOURCE_BRANCH: ${{ needs.source.outputs.branch }}
+          SOURCE_VERSION: ${{ needs.source.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: |
@@ -112,40 +119,31 @@ jobs:
           # This also supports selected refs with older build scripts.
           export GITHUB_SHA="$SOURCE_COMMIT"
           export GITHUB_REF_NAME="$SOURCE_BRANCH"
+          export HERMES_PAYLOAD_VERSION="$SOURCE_VERSION"
           npm run build
           if [[ "$PLATFORM" == mac ]]; then
-            npm run builder -- --mac dmg --arm64 -c.mac.identity=-
+            npm run builder -- --mac dmg --arm64 -c.mac.identity=- "-c.extraMetadata.version=$SOURCE_VERSION"
             codesign --verify --deep --strict release/mac-arm64/Hermes.app
           else
-            npm run builder -- --win nsis --x64
+            npm run builder -- --win msix zip --x64 "-c.extraMetadata.version=$SOURCE_VERSION"
           fi
       - name: Verify packaged source identity and save the receipt
-        working-directory: apps/desktop
+        working-directory: source
         shell: bash
         env:
           SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
           SOURCE_BRANCH: ${{ needs.source.outputs.branch }}
+          SOURCE_VERSION: ${{ needs.source.outputs.version }}
           PLATFORM: ${{ matrix.platform }}
-        run: |
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict'
-          import {readFileSync, writeFileSync} from 'node:fs'
-          const {PLATFORM, SOURCE_COMMIT, SOURCE_BRANCH} = process.env
-          const resources = PLATFORM === 'mac' ? 'release/mac-arm64/Hermes.app/Contents/Resources' : 'release/win-unpacked/resources'
-          const stamp = JSON.parse(readFileSync(`${resources}/install-stamp.json`, 'utf8'))
-          assert.equal(stamp.commit, SOURCE_COMMIT)
-          assert.equal(stamp.branch ?? '', SOURCE_BRANCH)
-          assert.equal(stamp.source, 'ci')
-          assert.equal(stamp.dirty, false)
-          const version = JSON.parse(readFileSync('package.json', 'utf8')).version
-          writeFileSync(`release/desktop-${PLATFORM}-build.json`, JSON.stringify({...stamp, version, platform: PLATFORM, run: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`}, null, 2))
-          JS
+        run: node ../.release-controller/apps/desktop/scripts/fork-release.mjs receipt .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installer-${{ matrix.platform }}
           path: |
-            ${{ matrix.artifact }}
-            apps/desktop/release/desktop-*-build.json
+            source/apps/desktop/release/*.dmg
+            source/apps/desktop/release/*.msix
+            source/apps/desktop/release/*.zip
+            source/apps/desktop/release/desktop-*-build.json
           if-no-files-found: error
           retention-days: 14
 
@@ -182,6 +180,7 @@ jobs:
 
           Build: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           macOS packages use ad-hoc signing (no Apple Developer ID or notarization).
+          Windows MSIX packages are unsigned; the portable ZIP is included for manual use. These are source-client packages without a bundled Python runtime. Native installation and startup have not been verified by this workflow.
           NOTES
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             target="$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)"
