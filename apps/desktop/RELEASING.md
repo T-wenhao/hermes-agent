@@ -23,6 +23,10 @@ macOS bundles use ad-hoc signing without Apple Developer ID or notarization. Win
 
 The receipt explicitly records `installationVerified: false`. Packaging and metadata checks do not prove native installation, startup, backend connectivity, upgrade/data retention, Gatekeeper acceptance or Windows trust. Verify those on the destination machines before adopting a build. This workflow does not publish updater feeds, submit to the Store, or use private Apple/Azure/R2 credentials.
 
+First-launch setup uses the baked `sourceRepository` allowlisted to this fork (or the official repository for official artifacts). Downloads and both installer clone operations use that same repository. Detached artifacts retain a separate `sourceBranch`, selected from an actual containing remote branch, so exact Home/DITT commits can pass the installer's existing ancestry check without being mislabeled as branch builds. A detached source with no containing branch is rejected. Both source branches must contain this runtime provenance support before they can produce a verified fork package.
+
+The build prepares `HERMES_PYTHON` through the pinned PM Python toolchain. Native Mac DMG preparation then acquires PM's locked `dmgbuild` vendor tree with its paired interpreter; an ambient Python alone does not satisfy this supplier contract.
+
 The workflow file must exist on `custom/home` for push events to trigger. Its GitHub Actions state must also be active:
 
 ```sh

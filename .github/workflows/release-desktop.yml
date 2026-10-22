@@ -32,6 +32,7 @@ jobs:
     outputs:
       commit: ${{ steps.source.outputs.commit }}
       branch: ${{ steps.source.outputs.branch }}
+      bootstrap_branch: ${{ steps.source.outputs.bootstrap_branch }}
       version: ${{ steps.source.outputs.version }}
       release_tag: ${{ steps.source.outputs.release_tag }}
       matrix: ${{ steps.source.outputs.matrix }}
@@ -92,6 +93,13 @@ jobs:
           node-version: 26
           cache: npm
           cache-dependency-path: source/package-lock.json
+      - name: Prepare the locked Python for native packaging helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Windows ]]; then bootstrap=python; else bootstrap=python3; fi
+          "$bootstrap" -S scripts/ci/setup_toolchain.py prepare --toolchain python --home "$RUNNER_TEMP/fork-pm"
+          "$bootstrap" -S scripts/ci/setup_toolchain.py install --toolchain python --home "$RUNNER_TEMP/fork-pm"
       - name: Install locked workspace dependencies
         shell: bash
         run: |
@@ -103,7 +111,7 @@ jobs:
           node --test ../.release-controller/apps/desktop/scripts/fork-release.node-test.mjs
           npm exec -- vitest run apps/shared/src/json-rpc-channel.test.ts
           cd apps/desktop
-          npm exec -- vitest run scripts/write-build-stamp.test.mjs src/app/session/hooks/use-message-stream/gateway-event/server-requests.test.ts src/components/assistant-ui/tool/approval.test.tsx
+          npm exec -- vitest run scripts/write-build-stamp.test.mjs electron/bootstrap-runner.test.ts electron/bootstrap-runner-git-binary.test.ts scripts/prepare-dmgbuild.test.mjs src/app/session/hooks/use-message-stream/gateway-event/server-requests.test.ts src/components/assistant-ui/tool/approval.test.tsx
       - name: Build the pinned installer
         working-directory: source/apps/desktop
         shell: bash
@@ -111,6 +119,7 @@ jobs:
           SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
           SOURCE_BRANCH: ${{ needs.source.outputs.branch }}
           SOURCE_VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_BOOTSTRAP_BRANCH: ${{ needs.source.outputs.bootstrap_branch }}
           PLATFORM: ${{ matrix.platform }}
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: |
@@ -120,6 +129,8 @@ jobs:
           export GITHUB_SHA="$SOURCE_COMMIT"
           export GITHUB_REF_NAME="$SOURCE_BRANCH"
           export HERMES_PAYLOAD_VERSION="$SOURCE_VERSION"
+          export HERMES_BUILD_SOURCE_REPOSITORY='T-wenhao/hermes-agent'
+          export HERMES_BUILD_SOURCE_BRANCH="$SOURCE_BOOTSTRAP_BRANCH"
           npm run build
           if [[ "$PLATFORM" == mac ]]; then
             npm run builder -- --mac dmg --arm64 -c.mac.identity=- "-c.extraMetadata.version=$SOURCE_VERSION"
@@ -134,6 +145,7 @@ jobs:
           SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
           SOURCE_BRANCH: ${{ needs.source.outputs.branch }}
           SOURCE_VERSION: ${{ needs.source.outputs.version }}
+          SOURCE_BOOTSTRAP_BRANCH: ${{ needs.source.outputs.bootstrap_branch }}
           PLATFORM: ${{ matrix.platform }}
         run: node ../.release-controller/apps/desktop/scripts/fork-release.mjs receipt .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

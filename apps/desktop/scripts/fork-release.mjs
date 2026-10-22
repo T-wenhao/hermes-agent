@@ -24,6 +24,11 @@ export function resolveForkSource(repo, env = process.env, release = defaultRele
     branch = env.EVENT_BRANCH
   }
   assert.ok(!/[\r\n]/.test(branch), 'Invalid source branch')
+  const containing = git('for-each-ref', '--contains', commit, '--format=%(refname:strip=3)', 'refs/remotes/origin')
+    .split('\n').filter(name => name && name !== 'HEAD')
+  if (branch) assert.ok(containing.includes(branch), 'Selected source must be reachable from its origin branch')
+  const bootstrapBranch = branch || ['custom/home', 'custom/ditt', 'main', ...containing].find(name => containing.includes(name))
+  assert.ok(bootstrapBranch, 'Selected detached source has no containing branch for first-launch setup')
   const tag = env.REQUESTED_TAG || `desktop-${branch.replaceAll('/', '-') || 'manual'}-v${release.version}-${commit.slice(0, 12)}`
   assert.match(tag, /^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'Invalid release tag')
   const selections = {
@@ -33,10 +38,10 @@ export function resolveForkSource(repo, env = process.env, release = defaultRele
   const platforms = env.PLATFORMS || 'both'
   const include = platforms === 'both' ? [...selections.mac, ...selections.windows] : selections[platforms]
   assert.ok(include, 'Invalid installer platform')
-  return { commit, branch, version: release.version, release_tag: tag, matrix: JSON.stringify({ include }) }
+  return { commit, branch, bootstrap_branch: bootstrapBranch, version: release.version, release_tag: tag, matrix: JSON.stringify({ include }) }
 }
 
-export function verifyForkPackage({ releaseDir, resources, platform, commit, branch = '', version, run = '' }) {
+export function verifyForkPackage({ releaseDir, resources, platform, commit, branch = '', bootstrapBranch = branch, version, run = '' }) {
   assert.ok(platform === 'mac' || platform === 'windows', 'Unknown installer platform')
   const stamp = JSON.parse(readFileSync(join(resources, 'install-stamp.json'), 'utf8'))
   assert.equal(stamp.commit, commit, 'Package must identify the selected source')
@@ -45,6 +50,8 @@ export function verifyForkPackage({ releaseDir, resources, platform, commit, bra
   assert.equal(stamp.dirty, false, 'Published source must be clean')
   assert.equal(stamp.displayVersion, version, 'Package stamp must carry the injected version')
   assert.equal(stamp.payload, 'bootstrap', 'Fork workflow packages the source client without a bundled runtime')
+  assert.equal(stamp.sourceRepository, 'T-wenhao/hermes-agent', 'Selected source must support fork bootstrap provenance')
+  assert.equal(stamp.sourceBranch, bootstrapBranch, 'Bootstrap branch must contain the selected source')
   const formats = platform === 'mac' ? ['.dmg'] : ['.msix', '.zip']
   const files = readdirSync(releaseDir)
   const artifacts = formats.map(extension => {
@@ -65,7 +72,7 @@ if (isMain(import.meta.url)) {
     const source = resolveForkSource(resolve(root))
     for (const [key, value] of Object.entries(source)) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`)
   } else if (mode === 'receipt') {
-    const { PLATFORM, SOURCE_COMMIT, SOURCE_BRANCH, SOURCE_VERSION } = process.env
+    const { PLATFORM, SOURCE_COMMIT, SOURCE_BRANCH, SOURCE_BOOTSTRAP_BRANCH, SOURCE_VERSION } = process.env
     const app = join(resolve(root), 'apps/desktop')
     const releaseDir = join(app, 'release')
     const resources = PLATFORM === 'mac'
@@ -73,7 +80,7 @@ if (isMain(import.meta.url)) {
       : join(releaseDir, 'win-unpacked/resources')
     const run = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
     const receipt = verifyForkPackage({ releaseDir, resources, platform: PLATFORM,
-      commit: SOURCE_COMMIT, branch: SOURCE_BRANCH, version: SOURCE_VERSION, run })
+      commit: SOURCE_COMMIT, branch: SOURCE_BRANCH, bootstrapBranch: SOURCE_BOOTSTRAP_BRANCH, version: SOURCE_VERSION, run })
     writeFileSync(join(releaseDir, `desktop-${PLATFORM}-build.json`), JSON.stringify(receipt, null, 2) + '\n')
   } else {
     throw new Error(`Unknown fork release command: ${mode}`)
