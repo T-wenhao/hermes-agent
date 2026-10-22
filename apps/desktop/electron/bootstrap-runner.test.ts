@@ -12,6 +12,7 @@ import {
   cleanInstallerLogLine,
   hasExistingGitCheckout,
   installRefForStamp,
+  installerEnv,
   isPinnedCommit,
   resolveInstallScript,
   resolveMarkerPinnedCommit,
@@ -20,6 +21,38 @@ import {
 
 const SCRIPT_NAME = process.platform === 'win32' ? 'install.ps1' : 'install.sh'
 const ZERO_COMMIT = '0000000000000000000000000000000000000000'
+
+test('official bootstrap clones from the same official source even with an inherited repo override', () => {
+  const previous = process.env.HERMES_REPO_URL
+  try {
+    process.env.HERMES_REPO_URL = 'https://github.com/untrusted/repo.git'
+    assert.equal(installerEnv('/fixture', { commit: 'a'.repeat(40), branch: 'main' }).HERMES_REPO_URL,
+      'https://github.com/NousResearch/hermes-agent.git')
+  } finally {
+    if (previous === undefined) delete process.env.HERMES_REPO_URL
+    else process.env.HERMES_REPO_URL = previous
+  }
+})
+
+test('fork bootstrap uses the admitted repository and containing branch for downloads and both installers', async () => {
+  const home = mkTmpHome()
+  const stamp = { commit: 'a'.repeat(40), branch: null, sourceBranch: 'custom/ditt', sourceRepository: 'T-wenhao/hermes-agent' }
+  try {
+    let downloaded
+    await resolveInstallScript({ installStamp: stamp, sourceRepoRoot: null, hermesHome: home, emit: () => {},
+      _download: async (ref, destination, repository) => { downloaded = { ref, destination, repository } } })
+    assert.equal(downloaded.repository, stamp.sourceRepository)
+    assert.equal(downloaded.ref, stamp.commit)
+    assert.ok(downloaded.destination.includes('T-wenhao-hermes-agent'))
+    assert.equal(installerEnv(home, stamp).HERMES_REPO_URL, 'https://github.com/T-wenhao/hermes-agent.git')
+    assert.deepEqual(buildPinArgs(stamp), ['-Commit', stamp.commit, '-Branch', 'custom/ditt'])
+    assert.ok(buildPosixPinArgs({ installStamp: stamp, activeRoot: '/fixture', hermesHome: home }).includes('custom/ditt'))
+    assert.equal(installRefForStamp(stamp, { pinCommit: false }).ref, 'custom/ditt')
+    await assert.rejects(() => resolveInstallScript({ installStamp: { ...stamp, sourceRepository: 'untrusted/repo' }, sourceRepoRoot: null, hermesHome: home, emit: () => {} }), /Untrusted/)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
 
 function mkTmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-bootstrap-test-'))

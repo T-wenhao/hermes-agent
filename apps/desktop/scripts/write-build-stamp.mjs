@@ -26,6 +26,7 @@ const DESKTOP_ROOT = resolve(import.meta.dirname, "..")
 const REPO_ROOT = resolve(DESKTOP_ROOT, "..", "..")
 const OUT_DIR = join(DESKTOP_ROOT, "build")
 const OUT_FILE = join(OUT_DIR, "install-stamp.json")
+const SOURCE_REPOSITORIES = JSON.parse(readFileSync(new URL('../source-repositories.json', import.meta.url), 'utf8'))
 
 function tryExec(argv, opts) {
   try {
@@ -217,6 +218,12 @@ function main() {
  * The PM bundle builder supplies launch paths only for bundled artifacts.
  */
 export function buildStampPayload(stamp, env = process.env, platform = process.platform, payload = null) {
+  const sourceRepository = env.HERMES_BUILD_SOURCE_REPOSITORY || null
+  if (sourceRepository && !SOURCE_REPOSITORIES.includes(sourceRepository)) {
+    throw new Error('Untrusted desktop source repository')
+  }
+  const sourceBranch = env.HERMES_BUILD_SOURCE_BRANCH || null
+  if (sourceBranch && !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(sourceBranch)) throw new Error('Invalid desktop source branch')
   const variant = (env.HERMES_DESKTOP_VARIANT || "").trim()
   const channelBuild = channelBuildRequest(env)
   if (channelBuild && (stamp.commit !== channelBuild.commit || stamp.dirty)) throw new Error('Channel build identity does not match stamp')
@@ -274,6 +281,8 @@ export function buildStampPayload(stamp, env = process.env, platform = process.p
     ...base,
     payload: variant === "store" ? "bundled" : variant || "bootstrap",
     distribution: "desktop-app",
+    ...(sourceRepository ? { sourceRepository } : {}),
+    ...(sourceBranch ? { sourceBranch } : {}),
 
     updateMechanism: commitBuild ? 'external' : updateMechanism,
     tag: channelBuild?.receiverCandidate ? channelBuild.releaseTag : env.HERMES_PAYLOAD_TAG || null,

@@ -81,6 +81,10 @@ export interface InstallStamp {
     | null
   /** The steward of a sealed tree ('desktop-app' | 'docker' | 'nix'), when packaged. */
   distribution: string | null
+  /** Build-admitted installer source; absent on official legacy artifacts. */
+  sourceRepository?: 'NousResearch/hermes-agent' | 'T-wenhao/hermes-agent'
+  /** An actual containing branch for bootstrap when artifact provenance is detached. */
+  sourceBranch?: string
   /** Who applies the next update. Required in every stamp. */
   updateMechanism: 'self' | 'app-installer' | 'electron-updater' | 'external' | 'microsoft-store'
   baseVersion: string | null

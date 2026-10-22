@@ -43,6 +43,7 @@ import { stripAnsi } from '../../shared/src/ansi'
 
 import { pathEnvKey, storeFirstPath } from './backend-env'
 import { hiddenWindowsChildOptions } from './windows-child-options'
+import sourceRepositories from '../source-repositories.json'
 
 const IS_WINDOWS = process.platform === 'win32'
 
@@ -157,7 +158,7 @@ function installRefForStamp(installStamp, { pinCommit = true } = {}) {
     (isPinnedCommit(installStamp.commit) || FALLBACK_COMMIT_RE.test(installStamp.commit))
 
   if (validStamp) {
-    const ref = installStamp.branch || FALLBACK_BRANCH
+    const ref = installStamp.sourceBranch || installStamp.branch || FALLBACK_BRANCH
 
     return {
       ref,
@@ -224,12 +225,18 @@ function cachedScriptPath(hermesHome, cacheKey) {
   return path.join(bootstrapCacheDir(hermesHome), `install-${cacheKey}.${process.platform === 'win32' ? 'ps1' : 'sh'}`)
 }
 
-function downloadInstallScript(ref, destPath) {
+function sourceRepositoryForStamp(installStamp) {
+  const repository = installStamp?.sourceRepository || 'NousResearch/hermes-agent'
+  if (!sourceRepositories.includes(repository)) throw new Error('Untrusted desktop source repository')
+  return repository
+}
+
+function downloadInstallScript(ref, destPath, repository = 'NousResearch/hermes-agent') {
   // Fetch from GitHub raw at the install ref: the packaged SHA for a fresh
   // install, the branch for an existing checkout or a non-git fallback stamp
   // (never the all-zero placeholder, which is not a real GitHub commit).
   const scriptName = installScriptName()
-  const url = `https://raw.githubusercontent.com/NousResearch/hermes-agent/${ref}/scripts/${scriptName}`
+  const url = `https://raw.githubusercontent.com/${repository}/${ref}/scripts/${scriptName}`
 
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(destPath), { recursive: true })
@@ -341,7 +348,9 @@ async function resolveInstallScript({
     )
   }
 
-  const cached = cachedScriptPath(hermesHome, installRef.cacheKey)
+  const repository = sourceRepositoryForStamp(installStamp)
+  const cacheKey = repository === 'NousResearch/hermes-agent' ? installRef.cacheKey : `${repository.replace('/', '-')}-${installRef.cacheKey}`
+  const cached = cachedScriptPath(hermesHome, cacheKey)
   const resolvedCommit = installRef.pinned ? installRef.ref : null
 
   // The cache is only this run's -File target, never a source of truth.
@@ -354,7 +363,7 @@ async function resolveInstallScript({
       (installRef.pinned ? '' : ' (unpinned branch)')
   })
 
-  await _download(installRef.ref, cached)
+  await _download(installRef.ref, cached, repository)
   emit({ type: 'log', line: `[bootstrap] saved to ${cached}` })
 
   return { path: cached, source: 'download', commit: resolvedCommit, kind: installScriptKind() }
@@ -429,8 +438,9 @@ function cleanInstallerLogLine(raw: string): string {
 // The installer drives Hermes's own toolchain (install.sh takes a uv from PATH
 // when it is new enough), so store dirs already on PATH stay ahead of the
 // login-shell entries shell-path.ts merged in front of them.
-function installerEnv(hermesHome) {
+function installerEnv(hermesHome, installStamp = null) {
   const env = { ...process.env, HERMES_HOME: hermesHome || process.env.HERMES_HOME || '' }
+  env['HERMES_REPO_URL'] = `https://github.com/${sourceRepositoryForStamp(installStamp)}.git`
   const key = pathEnvKey(env)
 
   env[key] = storeFirstPath(env[key] || '', { currentEnv: env })
@@ -438,7 +448,7 @@ function installerEnv(hermesHome) {
   return env
 }
 
-function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, hermesHome }: any = {}) {
+function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, hermesHome, installStamp }: any = {}) {
   return new Promise<any>((resolve, reject) => {
     const ps = process.platform === 'win32' ? resolveWindowsPowerShell() : 'pwsh'
     const fullArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...args]
@@ -450,7 +460,7 @@ function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, herme
         stdio: ['ignore', 'pipe', 'pipe'],
         // Pass HERMES_HOME through so install.ps1 respects the caller's
         // choice rather than re-computing the default.
-        env: installerEnv(hermesHome)
+        env: installerEnv(hermesHome, installStamp)
       })
     )
 
@@ -542,11 +552,11 @@ function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, herme
   })
 }
 
-function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome }: any = {}) {
+function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome, installStamp }: any = {}) {
   return new Promise<any>((resolve, reject) => {
     const child = spawn('bash', [scriptPath, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: installerEnv(hermesHome)
+      env: installerEnv(hermesHome, installStamp)
     })
 
     let stdout = ''
@@ -651,8 +661,8 @@ function buildPinArgs(installStamp, { pinCommit = true } = {}) {
     args.push('-Commit', installStamp.commit)
   }
 
-  if (installStamp && installStamp.branch) {
-    args.push('-Branch', installStamp.branch)
+  if (installStamp && (installStamp.sourceBranch || installStamp.branch)) {
+    args.push('-Branch', installStamp.sourceBranch || installStamp.branch)
   }
 
   return args
@@ -661,8 +671,8 @@ function buildPinArgs(installStamp, { pinCommit = true } = {}) {
 function buildPosixPinArgs({ installStamp, activeRoot, hermesHome, pinCommit = true }) {
   const args = ['--dir', activeRoot, '--hermes-home', hermesHome]
 
-  if (installStamp && installStamp.branch) {
-    args.push('--branch', installStamp.branch)
+  if (installStamp && (installStamp.sourceBranch || installStamp.branch)) {
+    args.push('--branch', installStamp.sourceBranch || installStamp.branch)
   }
 
   if (pinCommit && installStamp && isPinnedCommit(installStamp.commit)) {
@@ -693,7 +703,8 @@ async function fetchManifest({
     emit,
     stageName: '__manifest__',
     abortSignal,
-    hermesHome
+    hermesHome,
+    installStamp
   })
 
   if (result.code !== 0) {
@@ -779,7 +790,8 @@ async function runStage({
     emit,
     stageName: stage.name,
     abortSignal,
-    hermesHome
+    hermesHome,
+    installStamp
   })
 
   const durationMs = Date.now() - startedAt
@@ -1037,6 +1049,8 @@ export {
   cleanInstallerLogLine,
   hasExistingGitCheckout,
   installRefForStamp,
+  installerEnv,
+  sourceRepositoryForStamp,
   isPinnedCommit,
   // Exposed for testability
   parseStageResult,
