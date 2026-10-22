@@ -113,6 +113,11 @@ test('source builds declare the same artifact schema, without a payload', () => 
   assert.equal(stamp.runtime, undefined)
   assert.equal(stamp.tag, null)
   assert.equal(stamp.commit, baseStamp.commit)
+  const fork = buildStampPayload(baseStamp, { HERMES_BUILD_SOURCE_REPOSITORY: 'T-wenhao/hermes-agent', HERMES_BUILD_SOURCE_BRANCH: 'custom/ditt' })
+  assert.equal(fork.sourceRepository, 'T-wenhao/hermes-agent')
+  assert.equal(fork.sourceBranch, 'custom/ditt')
+  assert.equal(stamp.sourceRepository, undefined, 'Official builds retain their default source')
+  assert.throws(() => buildStampPayload(baseStamp, { HERMES_BUILD_SOURCE_REPOSITORY: 'untrusted/repository' }), /Untrusted/)
 })
 
 test('buildStampPayload keeps schemaVersion + provenance in the staged shape', () => {
