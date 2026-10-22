@@ -439,7 +439,7 @@ function cleanInstallerLogLine(raw: string): string {
 // when it is new enough), so store dirs already on PATH stay ahead of the
 // login-shell entries shell-path.ts merged in front of them.
 function installerEnv(hermesHome, installStamp = null) {
-  const env = { ...process.env, HERMES_HOME: hermesHome || process.env.HERMES_HOME || '' }
+  const env: NodeJS.ProcessEnv = { ...process.env, HERMES_HOME: hermesHome || process.env.HERMES_HOME || '' }
   env['HERMES_REPO_URL'] = `https://github.com/${sourceRepositoryForStamp(installStamp)}.git`
   const key = pathEnvKey(env)
 
