@@ -5,7 +5,7 @@
 - A push to `custom/home` automatically builds a macOS arm64 DMG and Windows x64 MSIX plus a portable ZIP.
 - Manual runs default to both platforms. `source_ref` selects an upgraded Home/DITT branch, tag or commit; `platforms` selects `mac`, `windows`, or `both`.
 - The source is resolved to one commit before the platform builds start.
-- Releases use `desktop-<branch>-v<version>-<source-sha>` tags by default. `fork-release.json` pins version `0.22.4` and its official source commit; the workflow rejects sources that do not contain that baseline. Update this file when adopting a later official release. Upstream's `package.json` version is a placeholder and must not be used for these releases.
+- Releases use `desktop-<branch>-v<version>-<source-sha>` tags by default. `fork-release.json` pins version `0.22.5` and its official source commit; the workflow rejects sources that do not contain that baseline. Update this file when adopting a later official release. Upstream's `package.json` version is a placeholder and must not be used for these releases.
 - The version is injected into package metadata and the install stamp. Each release includes `desktop-<platform>-build.json` with the source commit, branch, version, artifact SHA256 hashes and run URL.
 - Controller scripts come from the immutable workflow revision in a separate checkout. The selected source needs no Home-specific release files, so `source_ref=custom/ditt` works after that branch is upgraded to the pinned baseline.
 
@@ -19,7 +19,7 @@ gh workflow run release-desktop.yml --ref custom/home -f source_ref=custom/home 
 
 The workflow checks the approval protocol and release helper contracts, packages the source client, verifies its source metadata, and publishes a pre-release. It does not bundle Python or a prepared Hermes runtime; first-launch backend setup can still require the network. Complete bundled distributions use the separate upstream process described in `BUILDING.md`.
 
-macOS bundles use ad-hoc signing without Apple Developer ID or notarization. Windows MSIX packages are unsigned and are not ordinary trusted installers; their manual installation depends on the machine's package trust/policy. The portable ZIP provides an alternative: extract the whole archive and launch `Hermes.exe`. The MSIX manifest requires Windows 11 22H2 or newer. The ZIP is a source client too.
+macOS bundles use ad-hoc signing without Apple Developer ID or notarization. The upstream Electron 44 runtime requires macOS 13 or newer. Windows MSIX packages are unsigned and are not ordinary trusted installers; their manual installation depends on the machine's package trust/policy. The portable ZIP provides an alternative: extract the whole archive and launch `Hermes.exe`. The MSIX manifest requires Windows 11 22H2 or newer. The ZIP is a source client too.
 
 The receipt explicitly records `installationVerified: false`. Packaging and metadata checks do not prove native installation, startup, backend connectivity, upgrade/data retention, Gatekeeper acceptance or Windows trust. Verify those on the destination machines before adopting a build. This workflow does not publish updater feeds, submit to the Store, or use private Apple/Azure/R2 credentials.
 
