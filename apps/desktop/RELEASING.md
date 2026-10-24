@@ -25,7 +25,7 @@ The receipt explicitly records `installationVerified: false`. Packaging and meta
 
 First-launch setup uses the baked `sourceRepository` allowlisted to this fork (or the official repository for official artifacts). Downloads and both installer clone operations use that same repository. Detached artifacts retain a separate `sourceBranch`, selected from an actual containing remote branch, so exact Home/DITT commits can pass the installer's existing ancestry check without being mislabeled as branch builds. A detached source with no containing branch is rejected. Both source branches must contain this runtime provenance support before they can produce a verified fork package.
 
-The build prepares `HERMES_PYTHON` through the pinned PM Python toolchain. Native Mac DMG preparation then acquires PM's locked `dmgbuild` vendor tree with its paired interpreter; an ambient Python alone does not satisfy this supplier contract.
+The build prepares `HERMES_PYTHON` through the pinned PM Python toolchain. After `npm ci`, the upstream Electron runtime helper explicitly prepares the lock-pinned binary before desktop checks and packaging. Native Mac DMG preparation then acquires PM's locked `dmgbuild` vendor tree with its paired interpreter; an ambient Python alone does not satisfy this supplier contract.
 
 The workflow file must exist on `custom/home` for push events to trigger. Its GitHub Actions state must also be active:
 
