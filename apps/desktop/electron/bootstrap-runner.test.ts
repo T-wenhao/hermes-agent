@@ -11,8 +11,8 @@ import {
   cachedScriptPath,
   cleanInstallerLogLine,
   hasExistingGitCheckout,
-  installedAgentInstallScript,
   installRefForStamp,
+  installerEnv,
   isPinnedCommit,
   resolveInstallScript,
   resolveMarkerPinnedCommit,
@@ -21,6 +21,38 @@ import {
 
 const SCRIPT_NAME = process.platform === 'win32' ? 'install.ps1' : 'install.sh'
 const ZERO_COMMIT = '0000000000000000000000000000000000000000'
+
+test('official bootstrap clones from the same official source even with an inherited repo override', () => {
+  const previous = process.env.HERMES_REPO_URL
+  try {
+    process.env.HERMES_REPO_URL = 'https://github.com/untrusted/repo.git'
+    assert.equal(installerEnv('/fixture', { commit: 'a'.repeat(40), branch: 'main' }).HERMES_REPO_URL,
+      'https://github.com/NousResearch/hermes-agent.git')
+  } finally {
+    if (previous === undefined) delete process.env.HERMES_REPO_URL
+    else process.env.HERMES_REPO_URL = previous
+  }
+})
+
+test('fork bootstrap uses the admitted repository and containing branch for downloads and both installers', async () => {
+  const home = mkTmpHome()
+  const stamp = { commit: 'a'.repeat(40), branch: null, sourceBranch: 'custom/ditt', sourceRepository: 'T-wenhao/hermes-agent' }
+  try {
+    let downloaded
+    await resolveInstallScript({ installStamp: stamp, sourceRepoRoot: null, hermesHome: home, emit: () => {},
+      _download: async (ref, destination, repository) => { downloaded = { ref, destination, repository } } })
+    assert.equal(downloaded.repository, stamp.sourceRepository)
+    assert.equal(downloaded.ref, stamp.commit)
+    assert.ok(downloaded.destination.includes('T-wenhao-hermes-agent'))
+    assert.equal(installerEnv(home, stamp).HERMES_REPO_URL, 'https://github.com/T-wenhao/hermes-agent.git')
+    assert.deepEqual(buildPinArgs(stamp), ['-Commit', stamp.commit, '-Branch', 'custom/ditt'])
+    assert.ok(buildPosixPinArgs({ installStamp: stamp, activeRoot: '/fixture', hermesHome: home }).includes('custom/ditt'))
+    assert.equal(installRefForStamp(stamp, { pinCommit: false }).ref, 'custom/ditt')
+    await assert.rejects(() => resolveInstallScript({ installStamp: { ...stamp, sourceRepository: 'untrusted/repo' }, sourceRepoRoot: null, hermesHome: home, emit: () => {} }), /Untrusted/)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
 
 function mkTmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-bootstrap-test-'))
@@ -48,24 +80,6 @@ test('runBootstrap bails immediately when the signal is already aborted', async 
     events.some(ev => ev.type === 'failed' && /cancelled/i.test(ev.error)),
     'should emit a cancelled failure event'
   )
-})
-
-test('installedAgentInstallScript resolves the installer in the agent checkout', () => {
-  const home = mkTmpHome()
-
-  try {
-    assert.equal(installedAgentInstallScript(home), null, 'absent before the checkout exists')
-
-    const scriptsDir = path.join(home, 'hermes-agent', 'scripts')
-    fs.mkdirSync(scriptsDir, { recursive: true })
-    const scriptPath = path.join(scriptsDir, SCRIPT_NAME)
-    fs.writeFileSync(scriptPath, '#!/bin/sh\necho hi\n')
-
-    assert.equal(installedAgentInstallScript(home), scriptPath)
-    assert.equal(installedAgentInstallScript(null), null, 'null home -> null')
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true })
-  }
 })
 
 test('existing checkout detection requires git metadata', () => {
@@ -117,7 +131,7 @@ test('fallback install stamps use an unpinned branch ref', () => {
   assert.equal(isPinnedCommit(ZERO_COMMIT), false)
   assert.deepEqual(installRefForStamp(stamp), {
     ref: 'main',
-    cacheKey: 'fallback-main',
+    cacheKey: 'branch-main',
     pinned: false
   })
   // Must NOT pass -Commit / --commit for the all-zero placeholder.
@@ -132,7 +146,22 @@ test('fallback install stamps use an unpinned branch ref', () => {
   )
 })
 
-test('resolveMarkerPinnedCommit prefers real HEAD over fallback stamp zeros', () => {
+test('existing-checkout installer ref follows the branch instead of the packaged commit', () => {
+  const stamp = { commit: 'a'.repeat(40), branch: 'main' }
+
+  assert.deepEqual(installRefForStamp(stamp, { pinCommit: false }), {
+    ref: 'main',
+    cacheKey: 'branch-main',
+    pinned: false
+  })
+  assert.deepEqual(installRefForStamp(stamp), {
+    ref: stamp.commit,
+    cacheKey: stamp.commit,
+    pinned: true
+  })
+})
+
+test('resolveMarkerPinnedCommit prefers installed checkout HEAD over the packaged artifact', () => {
   const realHead = 'c'.repeat(40)
   assert.equal(
     resolveMarkerPinnedCommit({ commit: ZERO_COMMIT, branch: 'main' }, '/tmp/checkout', {
@@ -144,8 +173,8 @@ test('resolveMarkerPinnedCommit prefers real HEAD over fallback stamp zeros', ()
     resolveMarkerPinnedCommit({ commit: 'd'.repeat(40), branch: 'main' }, '/tmp/checkout', {
       resolveHead: () => realHead
     }),
-    'd'.repeat(40),
-    'packaged real pin wins over checkout HEAD'
+    realHead,
+    'the installed checkout owns source runtime identity'
   )
   assert.equal(
     resolveMarkerPinnedCommit({ commit: ZERO_COMMIT, branch: 'main' }, '/tmp/missing', {
@@ -159,14 +188,17 @@ test('resolveInstallScript downloads fallback stamps by branch instead of zero c
   const home = mkTmpHome()
 
   try {
-    const logs = []
+    const cached = cachedScriptPath(home, 'branch-main')
+    fs.mkdirSync(path.dirname(cached), { recursive: true })
+    fs.writeFileSync(cached, 'stale branch installer\n')
+
     const refs = []
 
     const result = await resolveInstallScript({
       installStamp: { commit: ZERO_COMMIT, branch: 'main' },
       sourceRepoRoot: null,
       hermesHome: home,
-      emit: ev => logs.push(ev),
+      emit: () => {},
       _download: async (ref, destPath) => {
         refs.push(ref)
         fs.mkdirSync(path.dirname(destPath), { recursive: true })
@@ -179,87 +211,102 @@ test('resolveInstallScript downloads fallback stamps by branch instead of zero c
     assert.deepEqual(refs, ['main'])
     assert.equal(result.source, 'download')
     assert.equal(result.commit, null)
-    assert.equal(result.path, cachedScriptPath(home, 'fallback-main'))
+    assert.equal(result.path, cached)
+    assert.match(fs.readFileSync(cached, 'utf8'), /fallback branch/)
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
 
-test('resolveInstallScript prefers a cached script without touching the network', async () => {
+test('resolveInstallScript refreshes the live branch for an existing checkout', async () => {
+  const home = mkTmpHome()
+
+  try {
+    const commit = 'a'.repeat(40)
+    const cached = cachedScriptPath(home, 'branch-main')
+    fs.mkdirSync(path.dirname(cached), { recursive: true })
+    fs.writeFileSync(cached, 'stale installer\n')
+
+    const refs = []
+
+    const result = await resolveInstallScript({
+      installStamp: { commit, branch: 'main' },
+      sourceRepoRoot: null,
+      hermesHome: home,
+      emit: () => {},
+      pinCommit: false,
+      _download: async (ref, destPath) => {
+        refs.push(ref)
+        fs.writeFileSync(destPath, 'fresh branch installer\n')
+
+        return destPath
+      }
+    })
+
+    assert.deepEqual(refs, ['main'])
+    assert.equal(result.source, 'download')
+    assert.equal(result.commit, null)
+    assert.equal(result.path, cached)
+    assert.equal(fs.readFileSync(cached, 'utf8'), 'fresh branch installer\n')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('resolveInstallScript refreshes an immutable-pin cache on a fresh install', async () => {
   const home = mkTmpHome()
 
   try {
     const commit = 'a'.repeat(40)
     const cached = cachedScriptPath(home, commit)
     fs.mkdirSync(path.dirname(cached), { recursive: true })
-    fs.writeFileSync(cached, '#!/bin/sh\necho cached\n')
+    fs.writeFileSync(cached, 'stale installer\n')
 
-    const logs = []
-
-    const result = await resolveInstallScript({
-      installStamp: { commit },
-      sourceRepoRoot: null,
-      hermesHome: home,
-      emit: ev => logs.push(ev)
-    })
-
-    assert.equal(result.source, 'cache')
-    assert.equal(result.path, cached)
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true })
-  }
-})
-
-test('resolveInstallScript falls back to the installed agent checkout on a 404', async () => {
-  const home = mkTmpHome()
-
-  try {
-    const commit = 'a'.repeat(40)
-    // Seed the installed agent checkout so the fallback has something to resolve.
-    const scriptsDir = path.join(home, 'hermes-agent', 'scripts')
-    fs.mkdirSync(scriptsDir, { recursive: true })
-    const installed = path.join(scriptsDir, SCRIPT_NAME)
-    fs.writeFileSync(installed, '#!/bin/sh\necho fallback\n')
-
-    const logs = []
+    const refs = []
 
     const result = await resolveInstallScript({
-      installStamp: { commit },
+      installStamp: { commit, branch: 'main' },
       sourceRepoRoot: null,
       hermesHome: home,
-      emit: ev => logs.push(ev),
-      // Simulate GitHub returning a 404 for the pinned commit.
-      _download: async () => {
-        throw new Error('Failed to download install.sh: HTTP 404')
+      emit: () => {},
+      _download: async (ref, destPath) => {
+        refs.push(ref)
+        fs.writeFileSync(destPath, 'fresh pinned installer\n')
+
+        return destPath
       }
     })
 
-    assert.equal(result.source, 'installed-agent')
-    // It should have copied the installer into the bootstrap cache.
-    assert.equal(result.path, cachedScriptPath(home, commit))
-    assert.ok(fs.existsSync(result.path), 'fallback script copied into cache')
+    assert.deepEqual(refs, [commit])
+    assert.equal(result.source, 'download')
+    assert.equal(result.commit, commit)
+    assert.equal(result.path, cached)
+    assert.equal(fs.readFileSync(cached, 'utf8'), 'fresh pinned installer\n')
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
 
-test('resolveInstallScript rethrows when the 404 fallback is unavailable', async () => {
+test('resolveInstallScript fails closed instead of executing an installed stale script', async () => {
   const home = mkTmpHome()
 
   try {
     const commit = 'a'.repeat(40)
-    // No installed agent checkout seeded -> nothing to fall back to.
+    const scriptsDir = path.join(home, 'hermes-agent', 'scripts')
+    fs.mkdirSync(scriptsDir, { recursive: true })
+    fs.writeFileSync(path.join(scriptsDir, SCRIPT_NAME), 'stale installed script\n')
+
     await assert.rejects(
       resolveInstallScript({
-        installStamp: { commit },
+        installStamp: { commit, branch: 'main' },
         sourceRepoRoot: null,
         hermesHome: home,
         emit: () => {},
         _download: async () => {
-          throw new Error('Failed to download install.sh: HTTP 404')
+          throw new Error('Failed to download install script: HTTP 404')
         }
       }),
-      /HTTP 404|Failed to download/
+      /HTTP 404/
     )
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
