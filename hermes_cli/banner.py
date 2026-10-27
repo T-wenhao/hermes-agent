@@ -149,6 +149,9 @@ def _resolve_repo_dir() -> Optional[Path]:
     Prefers the running code's location: ``$HERMES_HOME/hermes-agent/`` may be a stale copy
     carried over by ``--clone-all``.
     """
+    # Packaged code is identified by its stamp, never by a shared home's clone.
+    if get_version_info().distribution is not None:
+        return None
     repo_dir = Path(__file__).parent.parent.resolve()
     if not (repo_dir / ".git").exists():
         repo_dir = get_hermes_home() / "hermes-agent"
@@ -223,7 +226,10 @@ def format_banner_version_label() -> str:
             return f"{label} · installer"
         return label
 
-    base = f"Hermes Agent v{get_version_info().derived_version} ({RELEASE_DATE})"
+    info = get_version_info()
+    base = f"Hermes Agent v{info.derived_version} ({RELEASE_DATE})"
+    if info.distribution in {"docker", "nix"} and info.commit:
+        return f"{base} · {info.distribution} · commit {info.commit[:12]}"
     from hermes_cli.config import load_config
     from hermes_cli.update_channel import resolve_update_channel
 
