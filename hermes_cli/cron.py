@@ -46,7 +46,9 @@ def _builtin_gateway_liveness() -> Optional[bool]:
     A gateway launched from this home proves itself by process liveness. Any other scheduler that
     ticks this home — the host multiplexer for a served profile, or the in-process ticker inside
     ``hermes serve`` / the Desktop backend (#121881) — proves itself only by the fresh heartbeat it
-    writes into this home's store. External providers use their own machinery and are exempt.
+    writes into this home's store. A split deployment (gateway in a sibling container sharing this
+    home) hides every process from those scans; its control socket is the remaining proof.
+    External providers use their own machinery and are exempt.
     """
     try:
         if _active_cron_provider_name() != "builtin":
@@ -67,10 +69,33 @@ def _builtin_gateway_liveness() -> Optional[bool]:
         # A served named profile's heartbeat is the host multiplexer's, whose process the served
         # record already proves. Any other writer (the in-process ticker, a shared gateway whose
         # record omits this profile) must itself still be running: a killed ticker's last stamp
-        # reads fresh for ~3 minutes and would queue manual runs nobody picks up.
-        return named_profile_served_by_running_multiplexer() or ticker_heartbeat_writer_alive()
+        # reads fresh for ~3 minutes and would queue manual runs nobody picks up. The one writer
+        # those checks can never see — a split deployment's gateway, whose PID lives in a sibling
+        # container's namespace — is proven by its control socket instead.
+        return (named_profile_served_by_running_multiplexer() or ticker_heartbeat_writer_alive()
+                or _gateway_alive_via_control_socket())
     except Exception:
         return None
+
+
+def _gateway_alive_via_control_socket() -> bool:
+    """True when this home's gateway control socket answers ``identify``.
+
+    The control socket is the one scheduler proof that crosses a PID-namespace boundary: a split
+    deployment (gateway in one container, CLI/dashboard in another, this home shared via a mount)
+    hides the gateway's PID, PID file and runtime lock from every scan above, yet the socket —
+    bound the moment the gateway claims its PID file and refusing connections once the process
+    dies — still answers. ``gateway.control_socket``'s own contract: "a connectable socket with a
+    well-formed ``identify`` answer IS liveness". Consulted only after the same-namespace checks
+    fail, so a killed ticker whose last stamp still reads fresh keeps its "not running" verdict:
+    a dead process cannot answer.
+    """
+    try:
+        from gateway.control_socket import identify_gateway
+        from gateway.status import _get_process_hermes_home
+        return identify_gateway(_get_process_hermes_home()) is not None
+    except Exception:
+        return False
 
 
 def _warn_if_gateway_not_running() -> None:
