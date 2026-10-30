@@ -67,6 +67,23 @@ if (!/^\d+\.\d+\.\d+$/.test(electronVersion)) {
 }
 
 const macFeed = channelRequest ? null : feedContract.darwinFeed(channel === 'canary' || channel === 'light-canary' ? 'canary' : 'stable', light)
+
+const macSigningPolicy = {
+  entitlements: path.join(__dirname, 'electron/entitlements.mac.plist'),
+  entitlementsInherit: path.join(__dirname, 'electron/entitlements.mac.inherit.plist'),
+  hardenedRuntime: true,
+  ignore: (/** @type {string} */ file) => {
+    try {
+      return fs.lstatSync(file).isDirectory() ? false : !isMachO(file)
+    } catch {
+      return true
+    }
+  }
+}
+// v27 makes mac.sign an options object OR a custom signer. Source clients
+// have no payload to rehash, so keep explicit ad-hoc identity in that object.
+const adHocSourceClient = process.env.CSC_NAME === '-' &&
+  !['bundled', 'store'].includes(process.env.HERMES_DESKTOP_VARIANT || '')
 const publicUrl = feedContract.feedBaseUrl(process.env.CLOUDFLARE_R2_PUBLIC_URL)
 
 /** @satisfies {Configuration} */
@@ -180,21 +197,7 @@ module.exports = {
       NSAppleEventsUsageDescription: `${displayName} uses Apple Events to automate apps you explicitly ask it to control.`
     },
     target: ['dmg', 'zip'],
-    sign: createMacSigner({
-      entitlements: path.join(__dirname, 'electron/entitlements.mac.plist'),
-      entitlementsInherit: path.join(__dirname, 'electron/entitlements.mac.inherit.plist'),
-      hardenedRuntime: true,
-      ignore: (/** @type {string} */ file) => {
-        try {
-          if (fs.lstatSync(file).isDirectory()) {
-            return false
-          }
-          return !isMachO(file)
-        } catch {
-          return true
-        }
-      }
-    })
+    sign: adHocSourceClient ? { identity: '-', ...macSigningPolicy } : createMacSigner(macSigningPolicy)
   },
   dmg: {
     // Avoid the failing optional APFS shrink pass; keep compressed conversion.

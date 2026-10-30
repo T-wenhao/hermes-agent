@@ -112,6 +112,7 @@ jobs:
         shell: bash
         run: |
           node --test ../.release-controller/apps/desktop/scripts/fork-release.node-test.mjs
+          node --test apps/desktop/scripts/mac-adhoc-signing.node-test.mjs
           npm exec -- vitest run apps/shared/src/json-rpc-channel.test.ts
           cd apps/desktop
           npm exec -- vitest run scripts/write-build-stamp.test.mjs electron/bootstrap-runner.test.ts electron/bootstrap-runner-git-binary.test.ts scripts/prepare-dmgbuild.test.mjs src/app/session/hooks/use-message-stream/gateway-event/server-requests.test.ts src/components/assistant-ui/tool/approval.test.tsx
@@ -136,7 +137,7 @@ jobs:
           export HERMES_BUILD_SOURCE_BRANCH="$SOURCE_BOOTSTRAP_BRANCH"
           npm run build
           if [[ "$PLATFORM" == mac ]]; then
-            npm run builder -- --mac dmg --arm64 -c.mac.identity=- "-c.extraMetadata.version=$SOURCE_VERSION"
+            CSC_NAME=- npm run builder -- --mac dmg --arm64 "-c.extraMetadata.version=$SOURCE_VERSION"
             codesign --verify --deep --strict release/mac-arm64/Hermes.app
           else
             npm run builder -- --win msix zip --x64 "-c.extraMetadata.version=$SOURCE_VERSION"
